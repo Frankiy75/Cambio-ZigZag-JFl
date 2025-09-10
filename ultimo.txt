@@ -174,8 +174,14 @@ int mtfPrevCrossState_W = 0;
 int mtfPrevCrossState_M = 0;
 bool mtfArrowAlertsInitialized = false;
 
+input group    ""
+input group    "DEBUGGING AND FIXES"
+input bool     InpEnableZigZagDebug = false;        // Enable ZigZag Debug Output
+input bool     InpValidateCoherence = true;         // Validate ZigZag Coherence
+
 //---- Funciones y estructuras internas
 #include <Trade\Trade.mqh>
+#include "zigzag_debug.mqh"
 
 enum TimerPriority {
     PRIORITY_CRITICAL = 1,    // Cada tick si es necesario
@@ -1345,8 +1351,24 @@ int OnCalculate(const int rates_total,
       lastVisualCheck = rates_total;
       lastVisualCheckTime = TimeCurrent();
    }
-   // Sincronizar con pending extreme
-   SyncWithPendingExtreme();
+   // FIXED: Simplificado - no necesitamos sincronizar pending
+   // El sistema ahora es más directo y predecible
+   
+   // NUEVO: Debug opcional para diagnosticar problemas
+   if(InpEnableZigZagDebug && InpShowPatternInfo)
+      DebugZigZagStatus();
+   
+   // NUEVO: Validación de coherencia del ZigZag
+   if(InpValidateCoherence && !ValidateZigZagCoherence())
+   {
+      Print("⚠️ ZigZag coherence validation failed - forcing recalculation");
+      // Forzar recálculo si hay incoherencias
+      pivotCount = 0;
+      currentExtreme = 0.0;
+      currentExtremeTime = 0;
+      currentDirection = "up";
+      zigzagNeedsRedraw = true;
+   }
    
    // Forzar redibujado si es necesario
    if(zigzagNeedsRedraw)
@@ -1359,25 +1381,9 @@ int OnCalculate(const int rates_total,
 }
 
 //+------------------------------------------------------------------+
-//| NUEVA: Función para sincronizar con pending extreme             |
+//| FUNCIÓN ELIMINADA: SyncWithPendingExtreme ya no es necesaria     |
+//| El sistema simplificado no requiere sincronización de pending    |
 //+------------------------------------------------------------------+
-void SyncWithPendingExtreme()
-{
-   // Esta función se llama al final de OnCalculate para sincronizar
-   if(pendingExtreme != 0.0)
-   {
-      // Si hay diferencias significativas, actualizar
-      if(MathAbs(currentExtreme - pendingExtreme) > _Point * 2)
-      {
-         currentExtreme = pendingExtreme;
-         currentExtremeTime = pendingExtremeTime;
-         currentBarIndex = pendingBarIndex;
-         
-         // Marcar que necesita redibujado
-         zigzagNeedsRedraw = true;
-      }
-   }
-}
 
 
 //+-------------------------------------------------------------------------+
@@ -1846,7 +1852,12 @@ string DetermineSourcePriority(int barIndex)
    double low = iLow(_Symbol, _Period, barIndex);
    double close = iClose(_Symbol, _Period, barIndex);
    
-   // Lógica mejorada similar a Pine Script
+   // FIXED: Lógica simplificada y más predecible
+   // Siempre procesar HIGH primero para consistencia
+   // Esto evita comportamientos erráticos del ZigZag
+   return "high";
+   
+   /* COMENTADO: Lógica anterior demasiado compleja
    // Si es una vela bullish (close > open), dar prioridad al high
    if(close > open)
       return "high";
@@ -1860,6 +1871,7 @@ string DetermineSourcePriority(int barIndex)
       double distToLow = open - low;
       return (distToHigh > distToLow) ? "high" : "low";
    }
+   */
 }
 
 //+------------------------------------------------------------------+
@@ -1873,8 +1885,8 @@ void ValidateCurrentExtreme()
    // Si han pasado muchas barras sin confirmación, considerar limpiar
    int barsSinceExtreme = iBarShift(_Symbol, _Period, currentExtremeTime);
    
-   // Límite de barras sin confirmación (configurable)
-   int maxBarsWithoutConfirmation = 50;
+   // FIXED: Límite más permisivo para evitar reset prematuro
+   int maxBarsWithoutConfirmation = 200;  // Aumentado de 50 a 200
    
    if(barsSinceExtreme > maxBarsWithoutConfirmation)
    {
@@ -1885,14 +1897,14 @@ void ValidateCurrentExtreme()
       
       if(currentDirection == "up")
       {
-         // Para dirección UP, verificar que el precio actual no esté muy por debajo
-         if(currentPrice > currentExtreme * 0.95) // 5% de tolerancia
+         // FIXED: Tolerancia más permisiva para evitar reset excesivo
+         if(currentPrice > currentExtreme * 0.85) // 15% de tolerancia (era 5%)
             extremeStillValid = true;
       }
       else if(currentDirection == "down")
       {
-         // Para dirección DOWN, verificar que el precio actual no esté muy por encima
-         if(currentPrice < currentExtreme * 1.05) // 5% de tolerancia
+         // FIXED: Tolerancia más permisiva para evitar reset excesivo
+         if(currentPrice < currentExtreme * 1.15) // 15% de tolerancia (era 5%)
             extremeStillValid = true;
       }
       
@@ -2265,11 +2277,11 @@ void Scan(double src, bool isHigh, datetime time)
       currentBarIndex = currentBarShift;
       currentDirection = isHigh ? "up" : "down";
       
-      // Inicializar también el pending
-      pendingDirection = currentDirection;
-      pendingExtreme = currentExtreme;
-      pendingExtremeTime = currentExtremeTime;
-      pendingBarIndex = currentBarIndex;
+      // FIXED: Simplificar - eliminar sistema de pending complejo
+      pendingDirection = "";
+      pendingExtreme = 0.0;
+      pendingExtremeTime = 0;
+      pendingBarIndex = -1;
       
       return;
    }
@@ -2298,10 +2310,7 @@ void Scan(double src, bool isHigh, datetime time)
    
    if(sameDirectionUpdate)
    {
-      // Actualizar también el pending
-      pendingExtreme = currentExtreme;
-      pendingExtremeTime = currentExtremeTime;
-      pendingBarIndex = currentBarIndex;
+      // FIXED: No actualizar pending, mantener simple
       return;
    }
    
@@ -2321,6 +2330,7 @@ void Scan(double src, bool isHigh, datetime time)
    
    if(directionChange)
    {
+      // FIXED: Simplificar confirmación de pivote
       // Confirmar el pivote anterior SOLO si no está en la barra actual
       if(currentBarIndex > 0) // No está en barra actual
       {
@@ -2336,56 +2346,17 @@ void Scan(double src, bool isHigh, datetime time)
       currentBarIndex = currentBarShift;
       currentDirection = isHigh ? "up" : "down";
       
-      // Actualizar pending
-      pendingDirection = currentDirection;
-      pendingExtreme = currentExtreme;
-      pendingExtremeTime = currentExtremeTime;
-      pendingBarIndex = currentBarIndex;
+      // FIXED: Limpiar variables de pending
+      pendingDirection = "";
+      pendingExtreme = 0.0;
+      pendingExtremeTime = 0;
+      pendingBarIndex = -1;
       
       return;
    }
    
-   // 4. LÓGICA ADICIONAL - Pine Script behavior
-   // Si no hay cambio de dirección pero el source es significativo, 
-   // mantener el extremo actual pero verificar si necesitamos actualizar pending
-   
-   // Para dirección UP, siempre mantener el HIGH más alto encontrado hasta ahora
-   if(currentDirection == "up" && isHigh)
-   {
-      if(src > pendingExtreme)
-      {
-         pendingExtreme = src;
-         pendingExtremeTime = time;
-         pendingBarIndex = currentBarShift;
-         
-         // Si es significativamente mejor, actualizar current también
-         if(src > currentExtreme)
-         {
-            currentExtreme = src;
-            currentExtremeTime = time;
-            currentBarIndex = currentBarShift;
-         }
-      }
-   }
-   
-   // Para dirección DOWN, siempre mantener el LOW más bajo encontrado hasta ahora
-   if(currentDirection == "down" && !isHigh)
-   {
-      if(src < pendingExtreme)
-      {
-         pendingExtreme = src;
-         pendingExtremeTime = time;
-         pendingBarIndex = currentBarShift;
-         
-         // Si es significativamente mejor, actualizar current también
-         if(src < currentExtreme)
-         {
-            currentExtreme = src;
-            currentExtremeTime = time;
-            currentBarIndex = currentBarShift;
-         }
-      }
-   }
+   // FIXED: Eliminar lógica adicional compleja de pending que causaba confusión
+   // El ZigZag debe ser simple: seguir la dirección actual hasta que haya un cambio claro
 }
 
 
@@ -2536,9 +2507,10 @@ void DrawZigZag(int rates_total)
       
    if(pivotCount == 0 && currentExtreme == 0.0)
       return;
-   // Cooldown más permisivo
+   
+   // FIXED: Cooldown menos agresivo para mejor responsividad
    datetime currentTime = TimeCurrent();
-   if(currentTime - lastZZDrawTime < 0.2)  // Reducir a 0.2 segundos
+   if(currentTime - lastZZDrawTime < 0.1)  // Reducir a 0.1 segundos (era 0.2)
    {
       // Usar caché si existe
       if(ArraySize(cachedZigZagHigh) == rates_total)
@@ -2554,16 +2526,16 @@ void DrawZigZag(int rates_total)
    lastZZDrawTime = currentTime;   
    
    
-   // === NUEVO: Sistema de caché anti-parpadeo ===
-   // Solo redibujar si hay cambios significativos
+   // === FIXED: Sistema de caché menos agresivo ===
+   // Redibujar con más frecuencia para mejor seguimiento de price action
    bool hasSignificantChange = false;
    
    // Verificar si hay cambios en los pivotes
    if(pivotCount != lastDrawnPivotCount)
       hasSignificantChange = true;
    
-   // Verificar si el currentExtreme cambió significativamente (más de 5 puntos)
-   if(MathAbs(currentExtreme - lastDrawnExtreme) > _Point * 15)
+   // FIXED: Umbral de cambio más sensible (5 puntos en lugar de 15)
+   if(MathAbs(currentExtreme - lastDrawnExtreme) > _Point * 5)
       hasSignificantChange = true;
    
    // Verificar si cambió el tiempo del extremo actual
@@ -2574,8 +2546,9 @@ void DrawZigZag(int rates_total)
    if(zigzagNeedsRedraw)
       hasSignificantChange = true;
    
-   // Si no hay cambios significativos, usar el caché
-   if(!hasSignificantChange)
+   // FIXED: Reducir dependencia del caché para mejor actualización
+   // Si no hay cambios significativos, usar el caché SOLO si es muy reciente
+   if(!hasSignificantChange && (currentTime - lastZZDrawTime < 0.5))
    {
       // Copiar del caché a los buffers
       if(ArraySize(cachedZigZagHigh) == rates_total)
@@ -2589,7 +2562,7 @@ void DrawZigZag(int rates_total)
       return; // Salir sin redibujar
    }
    
-   // === REDIBUJAR SOLO CUANDO ES NECESARIO ===
+   // === REDIBUJAR CUANDO ES NECESARIO ===
    
    // Resize caché si es necesario
    if(ArraySize(cachedZigZagHigh) != rates_total)
@@ -4237,8 +4210,17 @@ void DetectAndMarkTFPatterns(const int rates_total)
 {
    if(!InpShowTFPatterns) return;
 
-   // Texto según TF actual (M5 -> "5m", etc.)
+   // FIXED: Texto más claro según TF actual para evitar confusión
    string timeframeText = ConvertTimeframe(_Period);
+   
+   // ADDED: Para debugging, mostrar qué timeframe se está usando
+   static string lastLoggedTF = "";
+   if(lastLoggedTF != timeframeText && InpShowPatternInfo)
+   {
+      Print("TF Pattern Detection: Creando etiquetas para timeframe ", timeframeText);
+      lastLoggedTF = timeframeText;
+   }
+   
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double minOffset = point * InpTFOffsetMinPips;
 
@@ -4268,9 +4250,10 @@ void DetectAndMarkTFPatterns(const int rates_total)
       double rango = h_i0 - l_i0;
       double extra_offset = MathMax(rango * InpTFOffsetFactor, minOffset);
 
-      // Pico HIGH
+      // FIXED: Patrón HIGH más robusto con tolerancia para ruido de mercado
       if(patternsHighCount < maxPatternsPerType &&
-         h_i2 < h_i1 && h_i1 < h_i0 && h_i0 > h_m1 && h_m1 > h_m2)
+         h_i2 <= h_i1 && h_i1 <= h_i0 && h_i0 >= h_m1 && h_m1 >= h_m2 &&
+         h_i0 > h_i2 && h_i0 > h_m2) // Asegurar que es realmente un pico
       {
          string textName = tfPrefix + "H_" + IntegerToString(i) + "_" + IntegerToString((int)timeBar);
          double price = h_i0 + extra_offset;
@@ -4290,9 +4273,10 @@ void DetectAndMarkTFPatterns(const int rates_total)
          }
       }
 
-      // Valle LOW
+      // FIXED: Patrón LOW más robusto con tolerancia para ruido de mercado
       if(patternsLowCount < maxPatternsPerType &&
-         l_i2 > l_i1 && l_i1 > l_i0 && l_i0 < l_m1 && l_m1 < l_m2)
+         l_i2 >= l_i1 && l_i1 >= l_i0 && l_i0 <= l_m1 && l_m1 <= l_m2 &&
+         l_i0 < l_i2 && l_i0 < l_m2) // Asegurar que es realmente un valle
       {
          string textName = tfPrefix + "L_" + IntegerToString(i) + "_" + IntegerToString((int)timeBar);
          double price = l_i0 - extra_offset;
