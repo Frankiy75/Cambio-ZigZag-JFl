@@ -1,0 +1,4805 @@
+//+------------------------------------------------------------------+
+//|  JFL_v14.mq5                                                    |
+//|  4-Point Pattern Detection_ZigZag Support/Resistance Lines       |
+//+------------------------------------------------------------------+
+
+#property copyright "Copyright 2024"
+#property link      ""
+#property version   "3.00"
+input bool InpIsEA_Instance = false; // NUEVO: Para identificar si es la instancia del EA
+#property indicator_chart_window
+
+#property indicator_chart_window
+#property indicator_buffers 10 
+#property indicator_plots   9  
+
+//--- plot ZigZag
+#property indicator_label1  "ZigZag"
+#property indicator_type1   DRAW_ZIGZAG
+#property indicator_color1  clrDodgerBlue
+#property indicator_style1  STYLE_SOLID
+#property indicator_width1  2
+#define EMPTY_BUFFER_VALUE -999999.0
+
+// Agregar en los inputs:
+input group    "CURRENT EXTREME LINE"
+input bool     InpShowCurrentExtremeLine = true;     // Mostrar línea del extremo actual
+input int      InpCurrentExtremeBars = 30;           // Barras hacia atrás
+
+//--- input parameters
+input group    ""
+input group    "ZIGZAG SETTINGS"
+input bool     InpDisplayZigZag = true;     // Display ZigZag
+input color    InpZigZagColor = clrYellowGreen; // ZigZag Color
+input int      InpLineWidth = 2;            // Line Width
+input ENUM_LINE_STYLE InpLineStyle = STYLE_DOT; // Line Style
+input int InpConfirmBars = 3; // Número de velas para confirmar pivote
+
+input group    ""
+input group    "SIGNAL FILTERING SETTINGSSignal"
+input bool     InpBufferOnlyDotted = true;                // Buffer: Only DOTTED lines for signals
+
+//--- NEW: Line System Parameters
+input group    ""
+input group    "LINE SYSTEM SETTINGS"
+input bool     InpEnableLineSystem = true;                // Enable Line System
+input int      InpMaxSupportLines = 4;                    // Max Support Lines Visible
+input int      InpMaxResistanceLines = 4;                 // Max Resistance Lines Visible
+input datetime InpStartTime = 0;                           // Start Time for Lines (0 = all)
+input bool     InpUseInteractiveTime = true;              // Use Interactive Time Selection
+input color    InpSupportColor = clrDodgerBlue;          // Support Line Color
+input color    InpResistanceColor = clrCyan;            // Resistance Line Color
+input int      InpLineWidthSR = 1;                        // S/R Line Width
+input ENUM_LINE_STYLE InpLineStyleSR = STYLE_DOT;       // S/R Line Style
+input bool     InpDebugMode = false;                       // Debug Mode (show all lines)
+input int      InpMaxTotalLines = 200;                     // Max Total Lines (performance)
+input double   InpCrossTolerance = 0;                      // Cross Detection Tolerance (0.001 = 0.1%)
+input bool     InpNeverDeleteLines = true;                // Nunca borrar líneas, solo ocultar
+
+
+input group    ""
+input group    "PATTERN DETECTION SETTINGS"
+input bool     InpUse4PointPattern = true;                // Use 4-Point Pattern Filter
+input bool     InpShowPatternInfo = true;                 // Show Pattern Detection Info
+input bool     InpSimplePatternMode = false;               // Simple Pattern Mode (local high/low only)
+
+input group    ""
+input group    "TRADING VISUALIZATION SETTINGS"
+input bool     InpShowTradingLevels = true;               // Show SL/TP Levels on Touch
+input color    InpSLColor = clrRed;                       // Stop Loss Color
+input color    InpTPColor = clrGreen;                     // Take Profit Color
+input int      InpTradingLineWidth = 2;                   // SL/TP Line Width
+input ENUM_LINE_STYLE InpTradingLineStyle = STYLE_DASH;   // SL/TP Line Style
+input int      InpPanelX = 10;                            // Panel X Position
+input int      InpPanelY = 100;                           // Panel Y Position
+
+input group    ""
+input group    "TIMEFRAME PATTERN DISPLAY"
+input bool     InpShowTFPatterns = true;          
+input double   InpTFOffsetFactor = 0.25;         
+input int      InpTFOffsetMinPips = 10;          
+input int      InpTFFontSize = 10;               
+input color    InpTFColorUp = clrGreen;          
+input color    InpTFColorDown = clrRed;
+
+input group    ""
+input group    "MTF TABLE DISPLAY"
+input bool     InpShowMTFTable = true;                // Show MTF Cross Table
+input int      InpTablePosX = 20;                     // Table X Position
+input int      InpTablePosY = 50;                     // Table Y Position
+input color    InpTableBgColor = C'25,25,35';         // Table Background Color
+input color    InpTableBorderColor = C'70,70,80';     // Table Border Color
+input color    InpTableTextColor = clrSilver;         // Table Text Color
+input color    InpArrowUpColor = clrLime;             // Arrow Up Color
+input color    InpArrowDownColor = clrRed;            // Arrow Down Color
+input int      InpTableFontSize = 10;                 // Table Font Size
+
+input group    ""
+input group    "MTF TABLE ALERTS"
+input bool     InpAlertOnArrowChange = true;
+input bool     InpArrowAlertVisual = true;
+input bool     InpArrowAlertSound = true;
+input string   InpArrowAlertSoundFile = "alert2.wav";
+
+
+//--- Global variables for interaction
+uint lastDragTime = 0;
+bool needsRefresh = false;
+
+//--- indicator buffers
+double ZigZagHigh[];
+double ZigZagLow[];
+//---- Trading signal buffers
+double SignalBuffer[];       // 1 = BUY, -1 = SELL, 0 = NONE, -999999 = VACÍO
+double EntryPriceBuffer[];   // Precio de entrada sugerido
+double StopLossBuffer[];     // Nivel de stop loss
+double TakeProfitBuffer[];   // Nivel de take profit
+double PatternValidationBuffer[]; // Confirmación de patrón válido: 1 = VÁLIDO, 0 = INVÁLIDO
+double LineQualityBuffer[];
+double LineTypeBuffer[];  // NUEVO: 1 = DOTTED (cuerpo), 2 = DASHED (mecha), 0 = sin toque
+double ZigZagDirectionBuffer[]; // NUEVO: Buffer para dirección actual del ZigZag
+
+//--- ZigZag state variables
+string currentDirection = "up";
+double currentExtreme = 0.0;
+datetime currentExtremeTime = 0;
+datetime closeTime = 0;
+int currentBarIndex = -1;
+
+// Variables para evitar parpadeo del ZigZag
+double cachedZigZagHigh[];
+double cachedZigZagLow[];
+double lastDrawnExtreme = 0.0;
+datetime lastDrawnExtremeTime = 0;
+int lastDrawnPivotCount = 0;
+bool zigzagNeedsRedraw = true;
+
+// Variables globales para cachear
+double lastProcessedExtreme = 0;
+datetime lastIntersectionTime = 0;
+int lastProcessedPivotCount = 0;
+
+// Variables para detectar cambios
+double lastCurrentExtreme = 0;
+datetime lastCurrentExtremeTime = 0;
+
+string pendingDirection = "";
+double pendingExtreme = 0.0;
+datetime pendingExtremeTime = 0;
+int pendingBarIndex = -1;
+
+// Variables para la tabla MTF
+string mtfTablePrefix = "";
+bool mtfTableCreated = false;
+int mtfTableX = 20;  // Posición X de la tabla
+int mtfTableY = 50;  // Posición Y de la tabla
+
+// Estados de cruces por TF (1=UP, -1=DOWN, 0=NONE)
+int mtfCrossState_5m = 0;
+int mtfCrossState_15m = 0;
+int mtfCrossState_1H = 0;
+int mtfCrossState_4H = 0;
+int mtfCrossState_12H = 0;
+int mtfCrossState_D = 0;
+int mtfCrossState_W = 0;
+int mtfCrossState_M = 0;
+
+int mtfPrevCrossState_5m = 0;
+int mtfPrevCrossState_15m = 0;
+int mtfPrevCrossState_1H = 0;
+int mtfPrevCrossState_4H = 0;
+int mtfPrevCrossState_12H = 0;
+int mtfPrevCrossState_D = 0;
+int mtfPrevCrossState_W = 0;
+int mtfPrevCrossState_M = 0;
+bool mtfArrowAlertsInitialized = false;
+
+//---- Funciones y estructuras internas
+#include <Trade\Trade.mqh>
+
+enum TimerPriority {
+    PRIORITY_CRITICAL = 1,    // Cada tick si es necesario
+    PRIORITY_HIGH = 5,        // Cada 5 segundos  
+    PRIORITY_MEDIUM = 30,     // Cada 30 segundos
+    PRIORITY_LOW = 300        // Cada 5 minutos
+};
+
+
+//--- Pivot structure
+struct SPivot
+{
+   struct SPoint
+   {
+      double price;
+      datetime time;
+
+      SPoint() {}
+      SPoint(const SPoint &other)
+      {
+         price = other.price;
+         time = other.time;
+      }
+   };
+
+   SPoint point;
+   double open;
+   double close;
+   bool isHigh;
+   bool isHigher;
+   bool isConfirmed;
+   string openLineName;
+   string closeLineName;
+   bool openLineCreated;
+   bool closeLineCreated;
+   double openPrice;
+   double closePrice;
+   bool closeBreaksPivot;
+   bool closeBreaksClose;
+
+   // Constructor por defecto
+   SPivot() {}
+
+   // Copy constructor
+   SPivot(const SPivot &other)
+   {
+      point = other.point;
+      open = other.open;
+      close = other.close;
+      isHigh = other.isHigh;
+      isHigher = other.isHigher;
+      isConfirmed = other.isConfirmed;
+      openLineName = other.openLineName;
+      closeLineName = other.closeLineName;
+      openLineCreated = other.openLineCreated;
+      closeLineCreated = other.closeLineCreated;
+      openPrice = other.openPrice;
+      closePrice = other.closePrice;
+      closeBreaksPivot = other.closeBreaksPivot;
+      closeBreaksClose = other.closeBreaksClose;
+   }
+};
+
+
+//--- NEW: Support/Resistance Line structure
+struct SSRLine
+{
+   datetime pivotTime;      // Time of the pivot that created this line
+   double pivotPrice;       // Price of the pivot
+   double linePrice;        // Actual price of the line (open or close)
+   bool isSupport;          // true = support, false = resistance
+   bool isVisible;          // Currently visible on chart
+   string lineObjectName;   // Chart object name
+   bool isOpenLine;         // true = from open, false = from close
+   datetime creationTime;   // When line was created
+   int touchCount;          // Number of times price touched this line
+   bool hasActiveOrder;     // EA will use this
+   int pivotIndex;          // Index of pivot that created this line
+   bool isPatternBased;     // PHASE 2: true if created by 4-point pattern
+   double val_i4_price;     // NUEVO: Precio de val_i4 para líneas de patrón
+   double val_i3_price;     // PHASE 2.5: Añadir precio de val_i3 (para SL)
+   bool isActive; // NUEVO: activa tras recalculo
+};
+
+//--- PHASE 2: Pattern Detection Structure
+struct S4PointPattern
+{
+   bool isValid;           // Pattern detected
+   bool isResistance;      // true = resistance, false = support
+   int pivotIndex;         // Index of pivot i2 (where to create line)
+   double linePrice;       // Price level for the line
+   datetime pivotTime;     // Time of the pivot
+   double val_i4_price;    // NUEVO: Precio de val_i4
+   double val_i3_price;    // PHASE 2.5: Precio de val_i3
+};
+
+//--- PHASE 2.5: Active Trading Level Structure
+struct SActiveTrading
+{
+   bool isActive;              // Trading levels active
+   int lineIndex;              // Index of S/R line being traded
+   double entryPrice;          // Entry price (S/R line)
+   double slPrice;             // Stop Loss price (val_i3)
+   double tpPrice;             // Take Profit price (val_i4)
+   bool isLong;               // true = long, false = short
+   datetime activationTime;    // When levels were activated
+   string slLineName;          // SL line object name
+   string tpLineName;          // TP line object name
+   double riskRewardRatio;     // R:R ratio
+   int pipsToSL;              // Distance to SL in pips
+   int pipsToTP;              // Distance to TP in pips
+};
+
+//--- Enum para tipos de cruce
+enum ENUM_CROSS_TYPE
+{
+   CROSS_NONE,    // No hay cruce
+   CROSS_BODY,    // Cruce con el cuerpo de la vela
+   CROSS_WICK     // Cruce solo con la mecha
+};
+
+//--- Estructura para información de cruce
+struct SCrossInfo
+{
+   ENUM_CROSS_TYPE type;
+   int barIndex;
+   datetime time;
+
+   SCrossInfo() {}
+
+   SCrossInfo(const SCrossInfo &other)
+   {
+      type = other.type;
+      barIndex = other.barIndex;
+      time = other.time;
+   }
+};
+
+struct LineDistance
+{
+   int index;
+   double distance;
+
+   LineDistance() {}
+
+   LineDistance(const LineDistance &other)
+   {
+      index = other.index;
+      distance = other.distance;
+   }
+};
+
+//--- Global variables
+SPivot pivots[];
+int pivotCount = 0;
+
+//--- NEW: Line management variables
+SSRLine srLines[];
+int lineCount = 0;
+string linePrefix = "ZZ_Line_";
+int lineCounter = 0;
+
+//--- NEW: State management
+bool isProcessing = false;
+
+//--- NEW: Interactive time selection
+datetime selectedStartTime = 0;
+string timeLineName = "ZZ_StartTimeLine";
+bool showTimeLine = true;
+bool isDragging = false;
+datetime lastClickTime = 0;
+bool timeFrozen = false;
+
+//--- NEW: Data protection
+bool dataInitialized = false;
+int lastKnownBars = 0;
+bool timerPending = false;
+
+//--- Variables para evitar parpadeo del comment
+string lastComment = "";
+datetime lastCommentUpdate = 0;
+bool forceCommentUpdate = false;
+
+//--- NUEVO: Para rastrear cruces de líneas
+struct SLineCross {
+   int lineIndex;
+   datetime firstCrossTime;
+   double crossPrice;
+};
+SLineCross pendingCrosses[];
+int crossCount = 0;
+
+static datetime lastZZDrawTime = 0;
+
+// Active trading variables 
+SActiveTrading activeTrading;
+string tradingPrefix = "ZZ_Trading_";
+string panelPrefix = "ZZ_Panel_";
+datetime lastTouchCheck = 0;
+
+//--- Function declarations
+void CreateSRLine(const SPivot &pivot, double price, bool isOpenLine, int pivotIdx, bool isPatternBased = false, double val_i4_price = 0, double val_i3_price = 0);
+bool Check4PointResistancePattern(int currentPivotIdx, S4PointPattern &pattern);
+bool Check4PointSupportPattern(int currentPivotIdx, S4PointPattern &pattern);
+void Scan4PointPatterns();
+void CreatePatternLine(const S4PointPattern &pattern);
+void CleanupLinesByPrice();
+void UpdateVisibleLines();
+SCrossInfo DetectLastCross(double levelPrice, double tolerancePercent = 0.001);
+double GetLastConfirmedLow(int &lowIndex);
+double GetLastConfirmedHigh(int &highIndex);
+string GetZigZagDirection();
+double GetZigZagMinimum();
+double GetZigZagMaximum();
+
+//--- MTF Function Declarations
+
+int  GetLastCrossDirection(ENUM_TIMEFRAMES tf);
+void UpdateMTFCrossStates();
+
+void ResetMTFSystem();
+
+void FireMTFArrowChangeAlerts();
+void AlertArrowChange(string tfName, int prev, int curr);
+
+
+//+------------------------------------------------------------------+
+//| NUEVA: Escanear patrones sin destruir líneas existentes         |
+//+------------------------------------------------------------------+
+void ScanPatternsWithoutDestruction()
+{
+    if(!InpEnableLineSystem || !InpUse4PointPattern || pivotCount < 5)
+        return;
+
+    datetime effectiveStart = GetEffectiveStartTime();
+    
+    // Escanear y crear SOLO líneas nuevas
+    for(int i = 4; i < pivotCount; i++)
+    {
+        int pivotShift = iBarShift(_Symbol, _Period, pivots[i].point.time);
+        if(pivotShift <= 0) continue;
+
+        S4PointPattern pattern;
+
+        // Verificar resistencia
+        if(Check4PointResistancePattern(i, pattern))
+        {
+            // Verificar si ya existe
+            bool exists = false;
+            for(int j = 0; j < lineCount; j++)
+            {
+                if(srLines[j].pivotIndex == pattern.pivotIndex &&
+                   !srLines[j].isSupport &&
+                   srLines[j].isPatternBased &&
+                   MathAbs(srLines[j].linePrice - pattern.linePrice) < _Point)
+                {
+                    exists = true;
+                    break;
+                }
+            }
+            
+            if(!exists)
+            {
+                CreatePatternLine(pattern);
+            }
+        }
+
+        // Verificar soporte
+        if(Check4PointSupportPattern(i, pattern))
+        {
+            // Verificar si ya existe
+            bool exists = false;
+            for(int j = 0; j < lineCount; j++)
+            {
+                if(srLines[j].pivotIndex == pattern.pivotIndex &&
+                   srLines[j].isSupport &&
+                   srLines[j].isPatternBased &&
+                   MathAbs(srLines[j].linePrice - pattern.linePrice) < _Point)
+                {
+                    exists = true;
+                    break;
+                }
+            }
+            
+            if(!exists)
+            {
+                CreatePatternLine(pattern);
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                          |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   // --- Definir el tamaño de los arrays (buffers) según la cantidad de barras
+   int bars = Bars(_Symbol, _Period); // Siempre el número actual de barras del gráfico
+
+   // --- Reservar memoria para todos los buffers
+   ArrayResize(ZigZagHigh, bars);
+   ArrayResize(ZigZagLow, bars);
+   ArrayResize(SignalBuffer, bars);
+   ArrayResize(EntryPriceBuffer, bars);
+   ArrayResize(StopLossBuffer, bars);
+   ArrayResize(TakeProfitBuffer, bars);
+   ArrayResize(PatternValidationBuffer, bars);
+   ArrayResize(LineQualityBuffer, bars);
+   ArrayResize(ZigZagDirectionBuffer, bars);
+   // Añadir después de la línea 278 en OnInit()
+   // Inicializar arrays de caché anti-parpadeo
+   ArrayResize(cachedZigZagHigh, bars);
+   ArrayResize(cachedZigZagLow, bars);
+   ArraySetAsSeries(cachedZigZagHigh, true);
+   ArraySetAsSeries(cachedZigZagLow, true);
+   zigzagNeedsRedraw = true;
+
+   
+   // ✅ MAPEAR TODOS LOS BUFFERS CORRECTAMENTE
+   SetIndexBuffer(0, ZigZagHigh, INDICATOR_DATA);
+   SetIndexBuffer(1, ZigZagLow, INDICATOR_DATA);
+   
+   // ✅ BUFFERS DE SEÑALES (2-7) - ESTOS FALTABAN
+   SetIndexBuffer(2, SignalBuffer, INDICATOR_DATA);
+   SetIndexBuffer(3, EntryPriceBuffer, INDICATOR_DATA);
+   SetIndexBuffer(4, StopLossBuffer, INDICATOR_DATA);
+   SetIndexBuffer(5, TakeProfitBuffer, INDICATOR_DATA);
+   SetIndexBuffer(6, PatternValidationBuffer, INDICATOR_DATA);
+   SetIndexBuffer(7, LineQualityBuffer, INDICATOR_DATA);
+   SetIndexBuffer(8, LineTypeBuffer, INDICATOR_DATA);
+   SetIndexBuffer(9, ZigZagDirectionBuffer, INDICATOR_DATA);
+
+
+
+   // ✅ INICIALIZAR ARRAYS
+   ArrayInitialize(SignalBuffer, EMPTY_BUFFER_VALUE);
+   ArrayInitialize(EntryPriceBuffer, EMPTY_BUFFER_VALUE);
+   ArrayInitialize(StopLossBuffer, EMPTY_BUFFER_VALUE);
+   ArrayInitialize(TakeProfitBuffer, EMPTY_BUFFER_VALUE);
+   ArrayInitialize(PatternValidationBuffer, 0);
+   ArrayInitialize(LineQualityBuffer, EMPTY_BUFFER_VALUE);
+   ArrayInitialize(LineTypeBuffer, 0);
+   ArrayInitialize(ZigZagDirectionBuffer, 0.0);
+
+
+   
+   // ✅ CONFIGURAR VALORES VACÍOS
+   PlotIndexSetDouble(0, PLOT_EMPTY_VALUE, 0.0);
+   PlotIndexSetDouble(1, PLOT_EMPTY_VALUE, 0.0);
+   PlotIndexSetDouble(2, PLOT_EMPTY_VALUE, EMPTY_BUFFER_VALUE);
+   PlotIndexSetDouble(3, PLOT_EMPTY_VALUE, EMPTY_BUFFER_VALUE);
+   PlotIndexSetDouble(4, PLOT_EMPTY_VALUE, EMPTY_BUFFER_VALUE);
+   PlotIndexSetDouble(5, PLOT_EMPTY_VALUE, EMPTY_BUFFER_VALUE);
+   PlotIndexSetDouble(6, PLOT_EMPTY_VALUE, 0);
+   PlotIndexSetDouble(7, PLOT_EMPTY_VALUE, EMPTY_BUFFER_VALUE);
+   PlotIndexSetDouble(8, PLOT_EMPTY_VALUE, 0);
+   PlotIndexSetDouble(9, PLOT_EMPTY_VALUE, 0.0);
+
+
+
+   // ✅ CONFIGURAR PROPIEDADES DEL ZIGZAG
+   PlotIndexSetInteger(0, PLOT_LINE_COLOR, InpZigZagColor);
+   PlotIndexSetInteger(0, PLOT_LINE_WIDTH, InpLineWidth);
+   PlotIndexSetInteger(0, PLOT_LINE_STYLE, InpLineStyle);
+   
+   // ✅ CONFIGURAR ARRAYS COMO SERIES
+   ArraySetAsSeries(ZigZagHigh, true);
+   ArraySetAsSeries(ZigZagLow, true);
+   ArraySetAsSeries(SignalBuffer, true);
+   ArraySetAsSeries(EntryPriceBuffer, true);
+   ArraySetAsSeries(StopLossBuffer, true);
+   ArraySetAsSeries(TakeProfitBuffer, true);
+   ArraySetAsSeries(PatternValidationBuffer, true);
+   ArraySetAsSeries(LineQualityBuffer, true);
+   ArraySetAsSeries(LineTypeBuffer, true);
+   ArraySetAsSeries(ZigZagDirectionBuffer, true);
+
+
+
+   
+   // ✅ CONFIGURAR PROPIEDADES DEL INDICADOR
+   IndicatorSetString(INDICATOR_SHORTNAME, "Custom ZigZag v2");
+   IndicatorSetInteger(INDICATOR_DIGITS, _Digits);
+   
+   // ✅ INICIALIZAR ARRAY DE PIVOTS
+   ArrayResize(pivots, 1000);
+   pivotCount = 0;
+
+   // Reset interaction state
+   isDragging = false;
+   lastClickTime = 0;
+   
+   // Verificar si el gráfico está listo
+   int attempts = 0;
+   while(iBars(_Symbol, _Period) == 0 && attempts < 50)
+   {
+       Sleep(10);
+       attempts++;
+   }
+   
+   // Crear tabla MTF
+   if(InpShowMTFTable) {
+       CreateMTFTable();
+   }
+   // Initialize prefixes WITH SYMBOL to avoid conflicts between charts
+   string symbolPrefix = _Symbol + "_";
+   linePrefix = symbolPrefix + "ZZ_Line_";
+   tradingPrefix = symbolPrefix + "ZZ_Trading_";
+   panelPrefix = symbolPrefix + "ZZ_Panel_";
+   timeLineName = symbolPrefix + "ZZ_StartTimeLine";
+   
+   //--- Initialize line array with reasonable size
+   ArrayResize(srLines, 500);
+   lineCount = 0;
+   
+   //--- Clean up any existing lines FOR THIS TIMEFRAME
+   CleanupAllLines();
+   CleanAllTradingLines();
+
+   // NUEVO: Limpiar líneas de trading antiguas de este timeframe
+   ObjectsDeleteAll(0, tradingPrefix, 0, -1);
+   
+   //--- Initialize interactive time selection
+   if(InpUseInteractiveTime && !InpIsEA_Instance)
+   {
+      // Use symbol-specific variables without timeframe
+      string varNameFrozen = "ZZ_TimeFrozen_" + _Symbol;
+      string varNameTime = "ZZ_SelectedTime_" + _Symbol;
+      
+      // Restore frozen state
+      if(GlobalVariableCheck(varNameFrozen) && GlobalVariableGet(varNameFrozen) > 0)
+      {
+         timeFrozen = true;
+      }
+      
+      /// Restore selected time
+      if(GlobalVariableCheck(varNameTime))
+      {
+         selectedStartTime = (datetime)GlobalVariableGet(varNameTime);
+         Print("Restored time settings - Frozen: ", timeFrozen, " Time: ", TimeToString(selectedStartTime));
+      }
+      else if(InpStartTime > 0)
+      {
+         selectedStartTime = InpStartTime;
+      }
+      else
+      {
+         selectedStartTime = 0; // MANTENER en 0 si no hay tiempo guardado
+      }
+      
+      // Create or update the time line SOLO si hay tiempo válido
+      if(selectedStartTime > 0 && ValidateSelectedTime())
+      {
+         // MODIFICADO: Solo crear/actualizar la línea si el tiempo NO está congelado.
+         // Si está congelado, no hacemos nada para que permanezca oculta,
+         // que es el comportamiento esperado al presionar la tecla 'T'.
+         if(!timeFrozen)
+         {
+            CreateTimeLine();
+         }
+      }
+      
+      
+      else if(selectedStartTime > 0)
+      {
+         Print("Selected time is invalid for current timeframe - line not created");
+      }
+
+   }
+   
+   // Check if pattern mode changed
+   string varNamePattern = "ZZ_PatternMode_" + _Symbol;
+
+   bool settingsChanged = false;
+
+   if(GlobalVariableCheck(varNamePattern))
+   {
+      bool savedPatternMode = (GlobalVariableGet(varNamePattern) > 0);
+      if(savedPatternMode != InpUse4PointPattern)
+      {
+         Print("Pattern mode changed - refreshing all lines");
+         CleanupAllLines();
+         settingsChanged = true;
+      }
+   }
+
+   GlobalVariableSet(varNamePattern, InpUse4PointPattern ? 1 : 0);
+
+   // MODIFICAR: Siempre refrescar en el inicio si hay tiempo seleccionado
+   if(settingsChanged || selectedStartTime > 0)
+   {
+      // Usar EventSetTimer para diferir la actualización
+      EventSetMillisecondTimer(200);
+      timerPending = true;
+   }
+   
+   //--- Enable chart events for interaction
+   ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, true);
+   ChartSetInteger(0, CHART_EVENT_MOUSE_WHEEL, false);
+
+   // Initialize active trading
+   activeTrading.isActive = false;
+
+   //--- NUEVO: Activar timer para verificación en tiempo real
+   EventSetTimer(1); // Verificar cada segundo
+   
+   // Limpia etiquetas antiguas que no están namespaced por TF
+   if(InpShowTFPatterns)
+      CleanLegacyTFLabels();
+   return (INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator deinitialization function                        |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   // Limpieza mínima segura
+   if(InpShowMTFTable && mtfTableCreated)
+      RemoveMTFTable();
+   
+   //--- Kill timer
+   EventKillTimer();
+   
+   // AÑADIR: Siempre desactivar trading levels
+   DeactivateTradingLevels();
+   
+   
+   
+   //--- Clean up based on reason
+   if(reason != REASON_CHARTCHANGE && !InpIsEA_Instance) 
+   {
+      // Clear all objects
+      CleanupAllLines();
+      DeactivateTradingLevels();
+      ObjectDelete(0, timeLineName);
+      
+      // Clear arrays
+      ArrayFree(srLines);
+      
+      // Only clear variables if not changing timeframe
+      if(reason != REASON_PARAMETERS && reason != REASON_ACCOUNT)
+      {
+         string varNameTime = "ZZ_SelectedTime_" + _Symbol;
+         string varNameFrozen = "ZZ_TimeFrozen_" + _Symbol;
+         GlobalVariableDel(varNameTime);
+         GlobalVariableDel(varNameFrozen);
+      }
+   }
+   else if(reason == REASON_CHARTCHANGE && !InpIsEA_Instance)
+   {
+      // AÑADIR: En cambio de timeframe, limpiar líneas de trading
+      DeactivateTradingLevels();
+      
+      // NUEVO: Preservar tiempo seleccionado en cambio de timeframe
+      if(InpUseInteractiveTime && selectedStartTime > 0)
+      {
+         string varNameTime = "ZZ_SelectedTime_" + _Symbol;
+         string varNameFrozen = "ZZ_TimeFrozen_" + _Symbol;
+         GlobalVariableSet(varNameTime, selectedStartTime);
+         if(timeFrozen)
+            GlobalVariableSet(varNameFrozen, 1);
+         Print("Timeframe change - preserving time: ", TimeToString(selectedStartTime));
+      }
+   }
+   
+   //--- Disable events
+   ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, false);
+   
+   Comment("");
+   
+   // Limpiar tabla MTF
+   RemoveMTFTable();
+   
+   // Limpiar línea del extremo actual
+   ObjectDelete(0, _Symbol + "_CurrentExtremeLine");
+   ObjectDelete(0, _Symbol + "_CurrentExtremeLine_Label");
+   
+   // Limpiar etiquetas de TF
+   if(InpShowTFPatterns)
+      CleanTFLabels();
+}
+
+//+------------------------------------------------------------------+
+//| Actualizar buffers con información de tipo de línea CORREGIDA   |
+//+------------------------------------------------------------------+
+void UpdateSignalBuffers(int barIndex, int rates_total)
+{
+    if(barIndex < 0 || barIndex >= rates_total) return;
+    
+    // ✅ INICIALIZAR BUFFERS CON VALORES VACÍOS
+    SignalBuffer[barIndex] = EMPTY_BUFFER_VALUE;
+    EntryPriceBuffer[barIndex] = EMPTY_BUFFER_VALUE;
+    StopLossBuffer[barIndex] = EMPTY_BUFFER_VALUE;
+    TakeProfitBuffer[barIndex] = EMPTY_BUFFER_VALUE;
+    PatternValidationBuffer[barIndex] = 0;
+    LineQualityBuffer[barIndex] = EMPTY_BUFFER_VALUE;
+
+    double currentPrice = iClose(_Symbol, _Period, barIndex);
+    
+    // ✅ Obtener filtro de tiempo efectivo
+    datetime effectiveStart = GetEffectiveStartTime();
+    
+    double bestEntry = 0;
+    double bestSL = 0;
+    double bestTP = 0;
+    int bestSignal = 0;
+    double minDistance = DBL_MAX;
+    bool foundValidLine = false;
+    double bestLineType = 0; // ✅ Para almacenar el tipo de línea
+
+    // ✅ REVISAR LÍNEAS CON FILTRO DE TIEMPO Y FILTRO DOTTED
+    for(int i = 0; i < lineCount; i++)
+    {
+        if(!srLines[i].isVisible || !srLines[i].isPatternBased) continue;
+        
+        // ✅ Aplicar filtro de tiempo igual que en UpdateVisibleLines()
+        if(effectiveStart != 0 && srLines[i].pivotTime < effectiveStart)
+            continue; // Saltar líneas anteriores al tiempo
+        
+        double linePrice = srLines[i].linePrice;
+        double distance = MathAbs(currentPrice - linePrice);
+        
+        // ✅ SOLO considerar líneas que estén a cierta distancia mínima
+        double minDistancePips = 10; // Mínimo 10 pips de distancia
+        if(distance < minDistancePips * _Point) continue;
+        
+        // ✅ NUEVO: FILTRO DOTTED DESDE EL BUFFER - Determinar tipo de línea ANTES de validar
+        SCrossInfo crossInfo = DetectLastCross(srLines[i].linePrice, InpCrossTolerance);
+        double currentLineType = 0.0;
+        
+        if(crossInfo.type == CROSS_BODY)
+            currentLineType = 1.0; // DOTTED
+        else if(crossInfo.type == CROSS_WICK)
+            currentLineType = 2.0; // DASHED
+        else
+            currentLineType = 1.0; // Por defecto DOTTED
+        
+        // ✅ FILTRO CRÍTICO: Solo líneas DOTTED
+        if(MathAbs(currentLineType - 1.0) > 0.1) // Si NO es DOTTED (es DASHED)
+        {
+            if(InpShowPatternInfo && barIndex == 0) // Solo log para barra actual
+            {
+                static datetime lastDashedLog = 0;
+                if(TimeCurrent() - lastDashedLog > 5) // Máximo cada 5 segundos
+                {
+                    Print("🔍 Línea DASHED ignorada en buffer: ", DoubleToString(linePrice, _Digits), 
+                          " | Distancia: ", DoubleToString(distance/_Point, 1), " pips",
+                          " | Tipo: ", srLines[i].isSupport ? "Support" : "Resistance");
+                    lastDashedLog = TimeCurrent();
+                }
+            }
+            continue; // SALTAR líneas DASHED - ESTA ES LA CLAVE
+        }
+        
+        // ✅ VERIFICAR si es una línea DOTTED válida para trading
+        bool isValidForTrading = false;
+        int signalType = 0;
+        
+        if(srLines[i].isSupport)
+        {
+            // Soporte: precio actual debe estar ARRIBA de la línea
+            if(currentPrice > linePrice)
+            {
+                isValidForTrading = true;
+                signalType = 1; // BUY
+            }
+        }
+        else
+        {
+            // Resistencia: precio actual debe estar ABAJO de la línea
+            if(currentPrice < linePrice)
+            {
+                isValidForTrading = true;
+                signalType = -1; // SELL
+            }
+        }
+        
+        // ✅ ENCONTRAR la línea DOTTED más cercana válida
+        if(isValidForTrading && distance < minDistance)
+        {
+            minDistance = distance;
+            bestSignal = signalType;
+            bestEntry = linePrice;
+            bestSL = srLines[i].val_i3_price;
+            bestTP = srLines[i].val_i4_price;
+            bestLineType = currentLineType; // Ya sabemos que es 1.0 (DOTTED) por el filtro
+            
+            foundValidLine = true;
+            
+            if(InpShowPatternInfo && barIndex == 0) // Solo log para barra actual
+            {
+                static datetime lastDottedLog = 0;
+                if(TimeCurrent() - lastDottedLog > 3) // Máximo cada 3 segundos
+                {
+                    Print("✅ Línea DOTTED seleccionada: ", DoubleToString(linePrice, _Digits), 
+                          " | Distancia: ", DoubleToString(distance/_Point, 1), " pips",
+                          " | Señal: ", signalType == 1 ? "BUY" : "SELL",
+                          " | Tipo: ", srLines[i].isSupport ? "Support" : "Resistance");
+                    lastDottedLog = TimeCurrent();
+                }
+            }
+        }
+    }
+
+    // ✅ Si encontramos una línea DOTTED válida, llenar los buffers
+    if(foundValidLine)
+    {
+        SignalBuffer[barIndex] = bestSignal;
+        EntryPriceBuffer[barIndex] = bestEntry;
+        StopLossBuffer[barIndex] = bestSL;
+        TakeProfitBuffer[barIndex] = bestTP;
+        PatternValidationBuffer[barIndex] = 1;
+        LineQualityBuffer[barIndex] = bestLineType; // Siempre será 1.0 (DOTTED)
+
+        // ✅ PRINT CONTROLADO - solo una vez por señal válida
+        static datetime lastSignalTime = 0;
+        static double lastSignalPrice = 0;
+        
+        if(barIndex == 0 && // Solo para barra actual
+           (TimeCurrent() - lastSignalTime > 5 || // Máximo cada 5 segundos
+            MathAbs(bestEntry - lastSignalPrice) > 10 * _Point)) // O si el precio cambió significativamente
+        {
+            if(InpShowPatternInfo)
+            {
+                // ✅ Información del filtro de tiempo y confirmación DOTTED
+                string timeInfo = (effectiveStart > 0) ? 
+                    " | Filtro tiempo: " + TimeToString(effectiveStart) : 
+                    " | Sin filtro tiempo";
+                
+                Print("📍 SEÑAL DOTTED DISPONIBLE: ", bestSignal == 1 ? "BUY" : "SELL", 
+                      " | Entry: ", DoubleToString(bestEntry, _Digits),
+                      " | Línea: DOTTED (confirmada)",
+                      " | Distancia: ", DoubleToString(minDistance/_Point, 1), " pips",
+                      " | SL: ", DoubleToString(bestSL, _Digits),
+                      " | TP: ", DoubleToString(bestTP, _Digits),
+                      timeInfo);
+            }
+            lastSignalTime = TimeCurrent();
+            lastSignalPrice = bestEntry;
+        }
+    }
+    else 
+    {
+        // ✅ NUEVO: Información cuando no hay líneas DOTTED válidas
+        if(barIndex == 0 && InpShowPatternInfo)
+        {
+            static datetime lastNoSignalTime = 0;
+            if(TimeCurrent() - lastNoSignalTime > 30) // Cada 30 segundos máximo
+            {
+                // Contar líneas disponibles por tipo
+                int totalLines = 0;
+                int dottedLines = 0;
+                int dashedLines = 0;
+                
+                for(int i = 0; i < lineCount; i++)
+                {
+                    if(srLines[i].isVisible && srLines[i].isPatternBased)
+                    {
+                        totalLines++;
+                        SCrossInfo crossInfo = DetectLastCross(srLines[i].linePrice, InpCrossTolerance);
+                        if(crossInfo.type == CROSS_BODY)
+                            dottedLines++;
+                        else if(crossInfo.type == CROSS_WICK)
+                            dashedLines++;
+                    }
+                }
+                
+                string timeInfo = (effectiveStart > 0) ? 
+                    " (Filtro tiempo activo desde: " + TimeToString(effectiveStart) + ")" : "";
+                
+                Print("ℹ️ No hay líneas DOTTED válidas disponibles", timeInfo);
+                Print("   Líneas totales: ", totalLines, " | DOTTED: ", dottedLines, " | DASHED: ", dashedLines);
+                
+                lastNoSignalTime = TimeCurrent();
+            }
+        }
+        
+        // ✅ Buffer de tipo de línea queda vacío cuando no hay señales DOTTED
+        LineQualityBuffer[barIndex] = EMPTY_BUFFER_VALUE;
+    }
+}
+
+//+------------------------------------------------------------------+
+//| NUEVA: Debug de sincronización tiempo vs buffer                  |
+//+------------------------------------------------------------------+
+void DebugTimeSyncronization()
+{
+    datetime effectiveStart = GetEffectiveStartTime();
+    int visibleLines = 0;
+    int totalLines = 0;
+    int filteredOutLines = 0;
+    
+    Print("=== DEBUG SINCRONIZACIÓN TIEMPO-BUFFER ===");
+    Print("Tiempo efectivo de filtro: ", effectiveStart > 0 ? TimeToString(effectiveStart) : "Sin filtro");
+    
+    for(int i = 0; i < lineCount; i++)
+    {
+        totalLines++;
+        
+        if(srLines[i].isVisible && srLines[i].isPatternBased)
+        {
+            if(effectiveStart != 0 && srLines[i].pivotTime < effectiveStart)
+            {
+                filteredOutLines++;
+                Print("❌ Línea filtrada: ", DoubleToString(srLines[i].linePrice, _Digits), 
+                      " | Tiempo: ", TimeToString(srLines[i].pivotTime));
+            }
+            else
+            {
+                visibleLines++;
+                Print("✅ Línea válida: ", DoubleToString(srLines[i].linePrice, _Digits), 
+                      " | Tiempo: ", TimeToString(srLines[i].pivotTime));
+            }
+        }
+    }
+    
+    Print("Total líneas: ", totalLines);
+    Print("Líneas visibles: ", visibleLines);
+    Print("Líneas filtradas por tiempo: ", filteredOutLines);
+    Print("==========================================");
+}
+
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                               |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+   // --- REDIMENSIONA ARRAYS AL INICIO SIEMPRE ---
+   int bars = rates_total;
+   ArrayResize(ZigZagHigh, bars);
+   ArrayResize(ZigZagLow, bars);
+   ArrayResize(SignalBuffer, bars);
+   ArrayResize(EntryPriceBuffer, bars);
+   ArrayResize(StopLossBuffer, bars);
+   ArrayResize(TakeProfitBuffer, bars);
+   ArrayResize(PatternValidationBuffer, bars);
+   ArrayResize(LineQualityBuffer, bars);
+   // --- NUEVO: Buffer de dirección ZigZag ---
+   ArrayResize(ZigZagDirectionBuffer, bars);
+   ArraySetAsSeries(ZigZagDirectionBuffer, true);
+
+   if(rates_total < 2)
+      return(0);
+
+   if(isProcessing)
+      return(prev_calculated);
+
+   isProcessing = true;
+   
+   // === NUEVO: Lógica mejorada para cambio de TF ===
+   bool isNewTimeframe = (prev_calculated == 0);
+   bool forceRecalculation = false;
+   
+   if(isNewTimeframe)
+   {
+      Print("Cambio de timeframe detectado - Recalculando ZigZag completo");
+      
+      // Forzar recálculo completo
+      
+      pivotCount = 0;
+      currentExtreme = 0.0;
+      currentExtremeTime = 0;
+      currentDirection = "up";
+      
+      // Limpiar líneas del TF anterior
+      for(int i = 0; i < lineCount; i++)
+      {
+         ObjectDelete(0, srLines[i].lineObjectName);
+      }
+      lineCount = 0;
+      
+      // Limpiar buffers completamente
+      ArrayInitialize(ZigZagHigh, 0.0);
+      ArrayInitialize(ZigZagLow, 0.0);
+      ArrayInitialize(ZigZagDirectionBuffer, 0.0);
+      
+      // Limpiar cache
+      ArrayInitialize(cachedZigZagHigh, 0.0);
+      ArrayInitialize(cachedZigZagLow, 0.0);
+      
+      forceRecalculation = true;
+   
+   
+   }
+
+
+   ArraySetAsSeries(time, true);
+   ArraySetAsSeries(open, true);
+   ArraySetAsSeries(high, true);
+   ArraySetAsSeries(low, true);
+   ArraySetAsSeries(close, true);
+
+   int start;
+   if(prev_calculated == 0)
+   {
+      start = rates_total - 2;
+      pivotCount = 0;
+      currentExtreme = 0.0;
+      currentExtremeTime = 0;
+      currentDirection = "up";
+
+      for(int i = 0; i < lineCount; i++)
+      {
+         ObjectDelete(0, srLines[i].lineObjectName);
+      }
+      lineCount = 0;
+
+      ArrayInitialize(ZigZagHigh, 0.0);
+      ArrayInitialize(ZigZagLow, 0.0);
+      // --- Inicializa buffer de dirección ---
+      ArrayInitialize(ZigZagDirectionBuffer, 0.0);
+   }
+   else
+   {
+      start = rates_total - prev_calculated;
+      if(start > 2) start = 2;
+   }
+
+   // --- Lógica principal ZigZag y pivotes ---
+   for (int i = start; i >= 0; i--)
+   {
+      if (i >= rates_total - 1)
+         continue;
+   
+      // Validar extremo antes de procesar
+      ValidateCurrentExtreme();
+   
+      double srcHigh = high[i];
+      double srcLow = low[i];
+      double srcHighPrev = (i + 1 < rates_total) ? high[i + 1] : srcHigh;
+      double srcLowPrev = (i + 1 < rates_total) ? low[i + 1] : srcLow;
+   
+      // LÓGICA MEJORADA similar a Pine Script
+      if (srcHigh != srcLow && srcLow < srcLowPrev && srcHigh > srcHighPrev)
+      {
+         string priority = DetermineSourcePriority(i);
+   
+         if (priority == "high")
+         {
+            Scan(srcHigh, true, time[i]);   // HIGH primero
+            Scan(srcLow, false, time[i]);   // LOW segundo
+         }
+         else
+         {
+            Scan(srcLow, false, time[i]);   // LOW primero
+            Scan(srcHigh, true, time[i]);   // HIGH segundo
+         }
+      }
+      else
+      {
+         // Procesar HIGH si es mayor que el anterior
+         if (srcHigh > srcHighPrev)
+         {
+            if (srcLow >= srcLowPrev) // Condición adicional de Pine Script
+            {
+               Scan(srcHigh, true, time[i]);
+            }
+         }
+         
+         // Procesar LOW si es menor que el anterior
+         if (srcLow < srcLowPrev)
+         {
+            if (srcHigh <= srcHighPrev) // Condición adicional de Pine Script
+            {
+               Scan(srcLow, false, time[i]);
+            }
+         }
+      }
+   }
+
+
+   // --- Lógica de líneas, patrones y actualización ---
+   DrawZigZag(rates_total);
+   
+   static double lastValidationExtreme = 0;
+   static int lastValidationPivotCount = 0;
+   
+   bool needsValidation = false;
+   if(MathAbs(currentExtreme - lastValidationExtreme) > _Point * 2)
+       needsValidation = true;
+   if(pivotCount != lastValidationPivotCount)
+       needsValidation = true;
+   
+   if(needsValidation)
+   {
+       CleanupLinesByPrice();
+       lastValidationExtreme = currentExtreme;
+       lastValidationPivotCount = pivotCount;
+   }
+   
+   DrawCurrentExtremeLinePrecise();
+
+   // Llamar a la detección de patrones TF
+   if(InpShowTFPatterns)
+   {
+      static int lastBarsCount = 0;
+      if(prev_calculated == 0 || lastBarsCount != rates_total)
+      {
+         CleanTFLabels();
+         DetectAndMarkTFPatterns(rates_total);
+         lastBarsCount = rates_total;
+      }
+   }
+   
+   // Verificar integridad de líneas visibles
+   static int lastVisibleCheck = 0;
+   if(rates_total != lastVisibleCheck)
+   {
+       lastVisibleCheck = rates_total;
+       
+       // Solo actualizar si realmente es necesario
+       int visibleCount = 0;
+       for(int i = 0; i < lineCount; i++)
+       {
+           if(srLines[i].isVisible && ObjectFind(0, srLines[i].lineObjectName) >= 0)
+               visibleCount++;
+       }
+       
+       // Si perdimos más del 50% de las líneas visibles, refrescar
+       if(visibleCount < lineCount / 2 && lineCount > 0)
+       {
+           UpdateVisibleLines();
+       }
+   }
+
+   // AUMENTAR tolerancia para evitar parpadeo
+   if(MathAbs(currentExtreme - lastCurrentExtreme) > _Point * 20 || // Cambió de 5 a 20
+      MathAbs(currentExtremeTime - lastCurrentExtremeTime) > PeriodSeconds(_Period) * 3) // Multiplicado por 3
+   {
+       // Solo eliminar líneas que realmente fueron invalidadas
+       for(int i = lineCount - 1; i >= 0; i--)
+       {
+           bool shouldRemove = false;
+           
+           // Solo verificar invalidación real, no marcar como inactiva
+           if(srLines[i].isPatternBased)
+           {
+               // Verificar si el patrón sigue siendo válido
+               S4PointPattern testPattern;
+               bool stillValid = false;
+               
+               // Re-verificar el patrón original
+               if(srLines[i].pivotIndex >= 0 && srLines[i].pivotIndex < pivotCount)
+               {
+                   int patternIdx = srLines[i].pivotIndex + 1; // Ajustar índice
+                   if(srLines[i].isSupport)
+                       stillValid = Check4PointSupportPattern(patternIdx, testPattern);
+                   else
+                       stillValid = Check4PointResistancePattern(patternIdx, testPattern);
+               }
+               
+               shouldRemove = !stillValid;
+           }
+           
+           if(shouldRemove)
+           {
+               if(InpNeverDeleteLines)
+               {
+                   // 🔒 Solo ocultar la línea cuando el patrón ya no es válido
+                   srLines[i].isVisible = false;
+                   ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_TIMEFRAMES, OBJ_NO_PERIODS);
+               }
+               else
+               {
+                   // ❌ Borrado clásico
+                   ObjectDelete(0, srLines[i].lineObjectName);
+                   for(int j = i; j < lineCount - 1; j++)
+                       srLines[j] = srLines[j + 1];
+                   lineCount--;
+               }
+           }
+       }
+       
+       // Añadir nuevas líneas si es necesario
+       ScanPatternsWithoutDestruction();
+       UpdateVisibleLines();
+       
+       lastCurrentExtreme = currentExtreme;
+       lastCurrentExtremeTime = currentExtremeTime;
+   }
+   
+   isProcessing = false;
+   if (needsRefresh && GetTickCount() - lastDragTime > 500)
+   {
+      needsRefresh = false;
+      DeactivateTradingLevels();
+      RefreshAllLines();
+      UpdateVisibleLines();
+      ChartRedraw();
+   }
+   static int lastBars = 0;
+   if(lastBars != rates_total)
+   {
+      lastBars = rates_total;
+   }
+   CheckTradingLevelsCrossed();
+   // Actualizar buffers para múltiples barras (no solo la actual)
+   for(int i = 0; i < MathMin(5, rates_total); i++)
+   {
+       UpdateSignalBuffers(i, rates_total);
+   }
+   // ✅ LIMPIAR LÍNEAS QUE QUEDEN A LA IZQUIERDA DE LA LÍNEA BLANCA
+   datetime effectiveStart = GetEffectiveStartTime();
+   if(effectiveStart > 0)
+   {
+      CleanupLinesByTime(effectiveStart);
+   }
+
+   // --- NUEVO: Actualizar buffer de dirección ZigZag para la barra actual ---
+   if(currentDirection == "up")
+      ZigZagDirectionBuffer[0] = 1.0;
+   else if(currentDirection == "down")
+      ZigZagDirectionBuffer[0] = -1.0;
+   else
+      ZigZagDirectionBuffer[0] = 0.0;
+   // ✅ Solo forzar actualización del comment si hay cambios importantes
+   static int lastPivotCount = 0;
+   static int lastLineCount = 0;
+   
+   if(pivotCount != lastPivotCount || lineCount != lastLineCount)
+   {
+       forceCommentUpdate = true;
+       lastPivotCount = pivotCount;
+       lastLineCount = lineCount;
+   }
+   
+   // ✅ MEJORADO: Comment solo cuando hay cambios importantes
+   BuildConsolidatedComment();
+   
+   // NUEVO: Verificación de integridad visual
+   static int lastVisualCheck = 0;
+   static datetime lastVisualCheckTime = 0;
+   
+   if(rates_total != lastVisualCheck || TimeCurrent() - lastVisualCheckTime > 2)
+   {
+      // Verificar que el ZigZag esté dibujado
+      bool hasZigZag = false;
+      for(int i = 0; i < MathMin(100, rates_total); i++)
+      {
+         if(ZigZagHigh[i] > 0 || ZigZagLow[i] > 0)
+         {
+            hasZigZag = true;
+            break;
+         }
+      }
+      
+      // Si no hay ZigZag visible pero hay pivotes, forzar redibujado
+      if(!hasZigZag && pivotCount > 0 && InpDisplayZigZag)
+      {
+         zigzagNeedsRedraw = true;
+         DrawZigZag(rates_total);
+         ChartRedraw();
+      }
+      
+      lastVisualCheck = rates_total;
+      lastVisualCheckTime = TimeCurrent();
+   }
+   // Sincronizar con pending extreme
+   SyncWithPendingExtreme();
+   
+   // Forzar redibujado si es necesario
+   if(zigzagNeedsRedraw)
+   {
+      DrawZigZag(rates_total);
+      ChartRedraw();
+   }
+
+   return(rates_total);
+}
+
+//+------------------------------------------------------------------+
+//| NUEVA: Función para sincronizar con pending extreme             |
+//+------------------------------------------------------------------+
+void SyncWithPendingExtreme()
+{
+   // Esta función se llama al final de OnCalculate para sincronizar
+   if(pendingExtreme != 0.0)
+   {
+      // Si hay diferencias significativas, actualizar
+      if(MathAbs(currentExtreme - pendingExtreme) > _Point * 2)
+      {
+         currentExtreme = pendingExtreme;
+         currentExtremeTime = pendingExtremeTime;
+         currentBarIndex = pendingBarIndex;
+         
+         // Marcar que necesita redibujado
+         zigzagNeedsRedraw = true;
+      }
+   }
+}
+
+
+//+-------------------------------------------------------------------------+
+//| OPCIONAL: Añadir función para limpiar todas las líneas de trading viejas|
+//+--------------------------------------------------------------------------+
+void CleanupOldTradingLines()
+{
+   // Find and delete orphaned trading lines
+   int deletedCount = 0;
+
+   // Get all objects
+   int totalObjects = ObjectsTotal(0);
+   for (int i = totalObjects - 1; i >= 0; i--)
+   {
+      string objName = ObjectName(0, i);
+
+      // If it's a trading line
+      if (StringFind(objName, tradingPrefix) >= 0)
+      {
+         // If not part of current active trading, delete it
+         if (!activeTrading.isActive ||
+            (objName != activeTrading.slLineName &&
+             objName != activeTrading.tpLineName &&
+             objName != activeTrading.slLineName + "_Text" &&
+             objName != activeTrading.tpLineName + "_Text"))
+         {
+            ObjectDelete(0, objName);
+            deletedCount++;
+         }
+      }
+   }
+
+   if (deletedCount > 0 && InpDebugMode)
+      Print("Cleaned up ", deletedCount, " orphaned trading lines");
+}
+
+//+------------------------------------------------------------------+
+//| Clean all trading lines from chart                               |
+//+------------------------------------------------------------------+
+void CleanAllTradingLines()
+{
+   int deletedCount = 0;
+   int totalObjects = ObjectsTotal(0);
+   
+   for(int i = totalObjects - 1; i >= 0; i--)
+   {
+      string objName = ObjectName(0, i);
+      
+      // IMPORTANTE: Solo borrar objetos de ESTE símbolo
+      if(StringFind(objName, tradingPrefix) == 0) // Cambiar >= 0 por == 0
+ 
+      {
+         ObjectDelete(0, objName);
+         deletedCount++;
+      }
+   }
+   
+   if(deletedCount > 0 && InpDebugMode)
+      Print("Cleaned up ", deletedCount, " trading lines");
+}
+
+//+------------------------------------------------------------------+
+//| OnChartEvent function for user interactions - CORREGIDA         |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id,
+                  const long &lparam,
+                  const double &dparam,
+                  const string &sparam)
+{
+   if(InpIsEA_Instance) return; // <-- AÑADIR ESTA LÍNEA AL INICIO
+   // ✅ Si arrastro la línea vertical blanca -> recalcular limpieza
+   if(id == CHARTEVENT_OBJECT_DRAG && sparam == timeLineName)
+   {
+      selectedStartTime = (datetime)ObjectGetInteger(0, timeLineName, OBJPROP_TIME);
+      if(ValidateSelectedTime())
+      {
+         CleanupLinesByTime(selectedStartTime);
+         UpdateVisibleLines();
+         ChartRedraw();
+      }
+      return;
+   }
+   // Handle keyboard events
+   if (id == CHARTEVENT_KEYDOWN)
+   {
+      // R key - Reset start time
+      if (lparam == 82 || lparam == 114) // R or r
+      {
+         if (InpUseInteractiveTime)
+         {
+            selectedStartTime = 0;
+            timeFrozen = false;
+
+            // Delete global variables
+            string varNameFrozen = "ZZ_TimeFrozen_" + _Symbol;
+            string varNameTime = "ZZ_SelectedTime_" + _Symbol;
+            GlobalVariableDel(varNameFrozen);
+            GlobalVariableDel(varNameTime);
+
+            // Recreate time line
+            ObjectDelete(0, timeLineName);
+            CreateTimeLine();
+         }
+         return;
+      }
+      // T key - Toggle time line
+      else if (lparam == 84 || lparam == 116) // T or t
+      {
+         if (InpUseInteractiveTime)
+         {
+            timeFrozen = !timeFrozen;
+
+            string varNameFrozen = "ZZ_TimeFrozen_" + _Symbol;
+            string varNameTime = "ZZ_SelectedTime_" + _Symbol;
+
+            if (timeFrozen)
+            {
+               // Freeze time
+               if (selectedStartTime == 0)
+               {
+                  selectedStartTime = TimeCurrent();
+               }
+               GlobalVariableSet(varNameFrozen, 1);
+               GlobalVariableSet(varNameTime, selectedStartTime);
+
+               // OCULTAR la línea cuando se congela
+               if (ObjectFind(0, timeLineName) >= 0)
+               {
+                  ObjectDelete(0, timeLineName);
+               }
+
+               Print("Time frozen at: ", TimeToString(selectedStartTime));
+            }
+            else
+            {
+               // Unfreeze time
+               GlobalVariableDel(varNameFrozen);
+
+               // Recrear la línea cuando se descongela
+               CreateTimeLine();
+
+               Print("Time unfrozen");
+            }
+
+            // ✅ Actualizar buffers cuando se congela/descongela
+            int rates_total = Bars(_Symbol, _Period);
+            for(int i = 0; i < MathMin(5, rates_total); i++)
+            {
+                UpdateSignalBuffers(i, rates_total);
+            }
+
+            ChartRedraw();
+         }
+         return;
+      }
+      // F key - Force refresh
+      else if(lparam == 70 || lparam == 102) // F or f key
+      {
+         Print("Forcing manual refresh...");
+         DeactivateTradingLevels();
+         RefreshAllLines();
+         UpdateVisibleLines();
+         
+         // ✅ Actualizar buffers en refresh manual
+         int rates_total = Bars(_Symbol, _Period);
+         for(int i = 0; i < MathMin(10, rates_total); i++)
+         {
+             UpdateSignalBuffers(i, rates_total);
+         }
+         
+         ChartRedraw();
+         Print("Manual refresh completed - Buffers synchronized");
+      }
+      // ✅ En la tecla 'Y', cambiar esta parte:
+      else if(lparam == 89 || lparam == 121) // Y or y key
+      {
+          Print("🔍 === VERIFICANDO SINCRONIZACIÓN TIEMPO-BUFFER ===");
+          
+          datetime effectiveStart = GetEffectiveStartTime();
+          Print("Tiempo efectivo de filtro: ", effectiveStart > 0 ? TimeToString(effectiveStart) : "Sin filtro activo");
+          
+          // Contar líneas
+          int totalLines = 0;
+          int visibleLines = 0;
+          int filteredLines = 0;
+          
+          for(int i = 0; i < lineCount; i++)
+          {
+              totalLines++;
+              
+              if(srLines[i].isVisible && srLines[i].isPatternBased)
+              {
+                  if(effectiveStart != 0 && srLines[i].pivotTime < effectiveStart)
+                  {
+                      filteredLines++;
+                  }
+                  else
+                  {
+                      visibleLines++;
+                  }
+              }
+          }
+          
+          Print("📊 Total líneas: ", totalLines);
+          Print("📊 Líneas visibles (post-filtro): ", visibleLines);
+          Print("📊 Líneas filtradas por tiempo: ", filteredLines);
+          
+          // ✅ CORREGIDO: Verificar buffer actual directamente
+          bool hasValidSignal = false;
+          if(SignalBuffer[0] != EMPTY_BUFFER_VALUE && EntryPriceBuffer[0] != EMPTY_BUFFER_VALUE)
+          {
+              hasValidSignal = true;
+              
+              // ✅ NUEVO: Mostrar tipo de línea correctamente
+              string lineTypeStr = "UNKNOWN";
+              if(LineQualityBuffer[0] == 1.0)
+                  lineTypeStr = "DOTTED";
+              else if(LineQualityBuffer[0] == 2.0)
+                  lineTypeStr = "DASHED";
+              
+              Print("📈 Buffer actual tiene señal válida: SI");
+              Print("   - Señal: ", SignalBuffer[0] == 1 ? "BUY" : "SELL");
+              Print("   - Entry: ", DoubleToString(EntryPriceBuffer[0], _Digits));
+              Print("   - Tipo línea: ", lineTypeStr);
+              Print("   - SL: ", DoubleToString(StopLossBuffer[0], _Digits));
+              Print("   - TP: ", DoubleToString(TakeProfitBuffer[0], _Digits));
+              Print("   ✅ Esta señal respeta el filtro de tiempo");
+          }
+          else
+          {
+              Print("📈 Buffer actual tiene señal válida: NO");
+              Print("   ℹ️ Sin señales (puede ser por filtro de tiempo o distancia)");
+          }
+          
+          Print("🔍 === VERIFICACIÓN COMPLETADA ===");
+      }
+   }
+   
+   // Handle mouse click
+   if(id == CHARTEVENT_CLICK)
+   {
+      if(InpUseInteractiveTime && !timeFrozen)
+      {
+         datetime clickTime;
+         double clickPrice;
+         int subWindow;
+         
+         if(ChartXYToTimePrice(0, (int)lparam, (int)dparam, subWindow, clickTime, clickPrice))
+         {
+            // Check if clicking near existing line
+            if(ObjectFind(0, timeLineName) >= 0)
+            {
+               datetime lineTime = (datetime)ObjectGetInteger(0, timeLineName, OBJPROP_TIME);
+               int lineX, lineY;
+               if(ChartTimePriceToXY(0, subWindow, lineTime, clickPrice, lineX, lineY))
+               {
+                  if(MathAbs(lineX - (int)lparam) < 10) // Within 10 pixels
+                  {
+                     // Select line for dragging
+                     ObjectSetInteger(0, timeLineName, OBJPROP_SELECTED, true);
+                     isDragging = true;
+                     ChartRedraw();
+                     return;
+                  }
+               }
+            }
+            
+            // Not clicking on line - set new position
+            selectedStartTime = clickTime;
+
+            // Save immediately
+            string varNameTime = "ZZ_SelectedTime_" + _Symbol;
+            GlobalVariableSet(varNameTime, selectedStartTime);
+
+            if(ObjectFind(0, timeLineName) >= 0)
+            {
+               ObjectSetInteger(0, timeLineName, OBJPROP_TIME, clickTime);
+            }
+            else
+            {
+               CreateTimeLine();
+            }
+            
+            // Desactivar trading levels antes de refrescar
+            DeactivateTradingLevels();
+            
+            // ✅ Actualizar buffers inmediatamente después del click
+            RefreshAllLines();
+            UpdateVisibleLines();
+            
+            int rates_total = Bars(_Symbol, _Period);
+            for(int i = 0; i < MathMin(5, rates_total); i++)
+            {
+                UpdateSignalBuffers(i, rates_total);
+            }
+            
+            ChartRedraw();
+            Print("Start time set to: ", TimeToString(clickTime), " | Buffers synchronized");
+         }
+      }
+   }
+   
+   // Handle object drag
+   if((id == CHARTEVENT_OBJECT_DRAG || id == CHARTEVENT_OBJECT_CHANGE) && sparam == timeLineName)
+   {
+      selectedStartTime = (datetime)ObjectGetInteger(0, timeLineName, OBJPROP_TIME);
+      if(ValidateSelectedTime())
+      {
+         CleanupLinesByTime(selectedStartTime);
+         UpdateVisibleLines();
+         ChartRedraw();
+      }
+      return;
+   }
+   {
+       if(InpUseInteractiveTime && !timeFrozen)
+       {
+           datetime newTime = (datetime)ObjectGetInteger(0, timeLineName, OBJPROP_TIME);
+           
+           if(newTime != selectedStartTime)
+           {
+               selectedStartTime = newTime;
+               
+               // Guardar inmediatamente
+               string varNameTime = "ZZ_SelectedTime_" + _Symbol;
+               GlobalVariableSet(varNameTime, selectedStartTime);
+               
+               // SOLO actualizar visibilidad durante el drag, NO recalcular patrones
+               UpdateVisibleLinesOnly(); // Nueva función más ligera
+               
+               // Marcar para refresh completo después
+               needsRefresh = true;
+               lastDragTime = GetTickCount();
+           }
+       }
+   }
+     
+   // Handle mouse move (for drag detection)
+   if(id == CHARTEVENT_MOUSE_MOVE)
+   {
+      long mouseState = StringToInteger(sparam);
+      
+      // Check if left button is released
+      if((mouseState & 1) == 0 && isDragging)
+      {
+         isDragging = false;
+         
+         // ✅ Final update when drag ends con actualización de buffers
+         DeactivateTradingLevels();
+         RefreshAllLines();
+         UpdateVisibleLines();
+         
+         int rates_total = Bars(_Symbol, _Period);
+         for(int i = 0; i < MathMin(10, rates_total); i++)
+         {
+             UpdateSignalBuffers(i, rates_total);
+         }
+         
+         ChartRedraw();
+         Print("Drag completed | Final buffer synchronization done");
+      }
+   }
+   
+   // Handle object deselection
+   if(id == CHARTEVENT_OBJECT_ENDEDIT)
+   {
+      if(sparam == timeLineName)
+      {
+         isDragging = false;
+         
+         // ✅ Actualizar buffers al finalizar edición
+         DeactivateTradingLevels();
+         RefreshAllLines();
+         UpdateVisibleLines();
+         
+         int rates_total = Bars(_Symbol, _Period);
+         for(int i = 0; i < MathMin(5, rates_total); i++)
+         {
+             UpdateSignalBuffers(i, rates_total);
+         }
+         
+         ChartRedraw();
+         Print("Time line editing completed | Buffers synchronized");
+      }
+   }
+   // === Añade esto al final del todo ===
+   ChartRedraw();
+}
+
+//+------------------------------------------------------------------+
+//| NUEVA: Actualizar solo visibilidad sin recalcular               |
+//+------------------------------------------------------------------+
+void UpdateVisibleLinesOnly()
+{
+    if(!InpEnableLineSystem || lineCount == 0)
+        return;
+    
+    datetime effectiveStart = GetEffectiveStartTime();
+    
+    for(int i = 0; i < lineCount; i++)
+    {
+        if(ObjectFind(0, srLines[i].lineObjectName) < 0)
+            continue;
+            
+        // Solo ocultar/mostrar según el tiempo
+        if(effectiveStart != 0 && srLines[i].pivotTime < effectiveStart)
+        {
+            ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_TIMEFRAMES, OBJ_NO_PERIODS);
+            srLines[i].isVisible = false;
+        }
+        else
+        {
+            // Mantener visible si está dentro del rango
+            if(!srLines[i].isVisible)
+            {
+                // 🔒 Mostrar SOLO en el timeframe actual
+                ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_TIMEFRAMES, 1 << (int)Period());
+                srLines[i].isVisible = true;
+            }
+        }
+    }
+    
+    ChartRedraw();
+}
+
+
+//+------------------------------------------------------------------+
+//| Limpieza de líneas anteriores al tiempo seleccionado (MODIFICADA)|
+//+------------------------------------------------------------------+
+void CleanupLinesByTime(datetime effectiveStart)
+{
+   if(effectiveStart <= 0) return;
+
+   for(int i = lineCount - 1; i >= 0; i--)
+   {
+      if(srLines[i].isVisible && srLines[i].pivotTime < effectiveStart)
+      {
+         if(InpNeverDeleteLines)
+         {
+            // 🔒 Solo ocultar la línea
+            srLines[i].isVisible = false;
+            ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_TIMEFRAMES, OBJ_NO_PERIODS);
+         }
+         else
+         {
+            // ❌ Modo clásico: borrar
+            ObjectDelete(0, srLines[i].lineObjectName);
+
+            // Compactar el array
+            for(int j = i; j < lineCount - 1; j++)
+               srLines[j] = srLines[j + 1];
+            lineCount--;
+         }
+      }
+   }
+}
+
+
+//+------------------------------------------------------------------+
+//| Determine source priority between high and low                    |
+//+------------------------------------------------------------------+
+string DetermineSourcePriority(int barIndex)
+{
+   double open = iOpen(_Symbol, _Period, barIndex);
+   double high = iHigh(_Symbol, _Period, barIndex);
+   double low = iLow(_Symbol, _Period, barIndex);
+   double close = iClose(_Symbol, _Period, barIndex);
+   
+   // Lógica mejorada similar a Pine Script
+   // Si es una vela bullish (close > open), dar prioridad al high
+   if(close > open)
+      return "high";
+   // Si es una vela bearish (close < open), dar prioridad al low  
+   else if(close < open)
+      return "low";
+   // Si es doji, usar distancia desde open
+   else
+   {
+      double distToHigh = high - open;
+      double distToLow = open - low;
+      return (distToHigh > distToLow) ? "high" : "low";
+   }
+}
+
+//+------------------------------------------------------------------+
+//| NUEVA: Función para validar y limpiar extremos obsoletos        |
+//+------------------------------------------------------------------+
+void ValidateCurrentExtreme()
+{
+   // Validar que el currentExtreme sigue siendo válido
+   if(currentExtreme == 0.0) return;
+   
+   // Si han pasado muchas barras sin confirmación, considerar limpiar
+   int barsSinceExtreme = iBarShift(_Symbol, _Period, currentExtremeTime);
+   
+   // Límite de barras sin confirmación (configurable)
+   int maxBarsWithoutConfirmation = 50;
+   
+   if(barsSinceExtreme > maxBarsWithoutConfirmation)
+   {
+      // El extremo está muy antiguo, necesita validación
+      double currentPrice = iClose(_Symbol, _Period, 0);
+      
+      bool extremeStillValid = false;
+      
+      if(currentDirection == "up")
+      {
+         // Para dirección UP, verificar que el precio actual no esté muy por debajo
+         if(currentPrice > currentExtreme * 0.95) // 5% de tolerancia
+            extremeStillValid = true;
+      }
+      else if(currentDirection == "down")
+      {
+         // Para dirección DOWN, verificar que el precio actual no esté muy por encima
+         if(currentPrice < currentExtreme * 1.05) // 5% de tolerancia
+            extremeStillValid = true;
+      }
+      
+      if(!extremeStillValid)
+      {
+         // Resetear el extremo
+         if(InpShowPatternInfo)
+            Print("Resetting obsolete extreme: ", currentExtreme, " after ", barsSinceExtreme, " bars");
+            
+         currentExtreme = 0.0;
+         currentExtremeTime = 0;
+         currentDirection = "up"; // Reset a estado inicial
+         pendingExtreme = 0.0;
+         pendingExtremeTime = 0;
+      }
+   }
+}
+
+
+//+------------------------------------------------------------------+
+//| Detectar el último cruce del precio con un nivel                 |
+//+------------------------------------------------------------------+
+SCrossInfo DetectLastCross(double levelPrice, double tolerancePercent = 0.001)
+{
+   SCrossInfo result;
+   result.type = CROSS_NONE;
+   result.barIndex = -1;
+   result.time = 0;
+   
+   // Calcular tolerancia en precio
+   double tolerance = levelPrice * tolerancePercent;
+   double upperBound = levelPrice + tolerance;
+   double lowerBound = levelPrice - tolerance;
+   
+   // Buscar desde la vela anterior (cerrada) hacia atrás
+   int maxBars = MathMin(1000, iBars(_Symbol, _Period));
+   
+   for(int i = 1; i < maxBars; i++)  // Empezar desde i=1 (vela anterior)
+   {
+      double high = iHigh(_Symbol, _Period, i);
+      double low = iLow(_Symbol, _Period, i);
+      double open = iOpen(_Symbol, _Period, i);
+      double close = iClose(_Symbol, _Period, i);
+      
+      // Verificar si la vela toca el nivel (con tolerancia)
+      bool candleTouchesLevel = (high >= lowerBound && low <= upperBound);
+      
+      if(!candleTouchesLevel) 
+         continue; // Esta vela no toca el nivel, siguiente
+      
+      // La vela toca el nivel, ahora determinar si fue el cuerpo o solo la mecha
+      double bodyHigh = MathMax(open, close);
+      double bodyLow = MathMin(open, close);
+      
+      // Verificar si el CUERPO toca el nivel
+      bool bodyTouchesLevel = (bodyHigh >= lowerBound && bodyLow <= upperBound);
+      
+      if(bodyTouchesLevel)
+      {
+         // El cuerpo tocó/cruzó el nivel -> DOTTED
+         result.type = CROSS_BODY;
+         result.barIndex = i;
+         result.time = iTime(_Symbol, _Period, i);
+         break; // Encontramos el toque más reciente
+      }
+      else
+      {
+         // Solo la mecha tocó el nivel -> DASHED
+         result.type = CROSS_WICK;
+         result.barIndex = i;
+         result.time = iTime(_Symbol, _Period, i);
+         break; // Encontramos el toque más reciente
+      }
+   }
+   
+   // Si no encontramos ningún toque
+   if(result.type == CROSS_NONE && InpDebugMode)
+   {
+      Print("No touch found for level: ", DoubleToString(levelPrice, _Digits));
+   }
+   
+   return result;
+}
+
+//+------------------------------------------------------------------+
+//| ✅ OnTimer OPTIMIZADO - Sistema de prioridades inteligente      |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+    static int timerCounter = 0;
+    static datetime lastCriticalCheck = 0;
+    
+    timerCounter++;
+    datetime now = TimeCurrent();
+    
+    // ==========================================
+    // NIVEL CRÍTICO - Solo si hay cambios reales
+    // ==========================================
+    bool hasCriticalChanges = false;
+    static double lastCriticalExtreme = 0;
+    static int lastCriticalPivots = 0;
+    
+    if(MathAbs(currentExtreme - lastCriticalExtreme) > _Point * 10 || 
+       pivotCount != lastCriticalPivots)
+    {
+        hasCriticalChanges = true;
+        lastCriticalExtreme = currentExtreme;
+        lastCriticalPivots = pivotCount;
+    }
+    
+    if(hasCriticalChanges && (now - lastCriticalCheck > 2))
+    {
+        // Solo cleanup crítico cuando realmente cambió algo importante
+        CleanupLinesByPrice();
+        lastCriticalCheck = now;
+        
+        if(InpDebugMode)
+            WriteLog("🔥 Cleanup crítico ejecutado - Extreme: " + DoubleToString(currentExtreme, _Digits));
+    }
+    
+    // ==========================================
+    // NIVEL ALTO - Cada 5 segundos (timerCounter % 5 == 0)
+    // ==========================================
+    if(timerCounter % 5 == 0)
+    {
+        // Solo actualizar tabla MTF si está activada Y visible
+        if(InpShowMTFTable && mtfTableCreated) 
+        {
+            static int lastMTFUpdate = 0;
+            if(timerCounter - lastMTFUpdate >= 5)
+            {
+                UpdateMTFCrossStates();
+                CreateMTFTable(); 
+                lastMTFUpdate = timerCounter;
+            }
+        }
+        
+        // Verificar niveles de trading solo si hay trading activo
+        if(InpShowTradingLevels && activeTrading.isActive)
+        {
+            CheckTradingLevelsCrossed();
+        }
+    }
+    
+    // ==========================================
+    // NIVEL MEDIO - Cada 30 segundos (timerCounter % 30 == 0)  
+    // ==========================================
+    if(timerCounter % 30 == 0)
+    {
+        // Actualizar buffers solo si hay cambios en señales
+        static double lastBufferExtreme = 0;
+        if(MathAbs(currentExtreme - lastBufferExtreme) > _Point * 5)
+        {
+            UpdateSignalBuffers(0, Bars(_Symbol, _Period));
+            lastBufferExtreme = currentExtreme;
+        }
+        
+        // Verificar toques de líneas (menos frecuente)
+        if(InpShowTradingLevels && !activeTrading.isActive)
+        {
+            CheckLineTouches();
+        }
+        
+        // Comment solo si hay cambios importantes
+        static int lastCommentPivots = 0;
+        if(pivotCount != lastCommentPivots)
+        {
+            forceCommentUpdate = true;
+            BuildConsolidatedComment();
+            lastCommentPivots = pivotCount;
+        }
+    }
+    
+    // ==========================================
+    // NIVEL BAJO - Cada 5 minutos (timerCounter % 300 == 0)
+    // ==========================================
+    if(timerCounter % 300 == 0)
+    {
+        // Health check silencioso
+        LogTimeSystemHealth();
+        
+        // Forzar redraw solo si es realmente necesario
+        static datetime lastForceRedraw = 0;
+        if(now - lastForceRedraw >= 180) // Cada 3 minutos máximo
+        {
+            bool needsRedraw = false;
+            
+            // Verificar integridad del ZigZag
+            if(InpDisplayZigZag && pivotCount > 0)
+            {
+                for(int i = 0; i < MathMin(50, Bars(_Symbol, _Period)); i++)
+                {
+                    if(ZigZagHigh[i] > 0 || ZigZagLow[i] > 0)
+                    {
+                        needsRedraw = true;
+                        break;
+                    }
+                }
+                
+                if(!needsRedraw)
+                {
+                    zigzagNeedsRedraw = true;
+                    DrawZigZag(Bars(_Symbol, _Period));
+                }
+            }
+            
+            ChartRedraw();
+            lastForceRedraw = now;
+        }
+    }
+    
+    // ==========================================
+    // LÍMITE DE EJECUCIÓN - Máximo cada segundo
+    // ==========================================
+    if(timerCounter >= 3600) // Reset cada hora para evitar overflow
+        timerCounter = 0;
+}
+
+
+
+//+------------------------------------------------------------------+
+//| Función para obtener el último LOW confirmado del ZigZag         |
+//+------------------------------------------------------------------+
+double GetLastConfirmedLow(int &lowIndex)
+{
+   lowIndex = -1;
+   
+   // Buscar el último LOW confirmado (no el current extreme si es LOW)
+   for(int i = pivotCount - 1; i >= 0; i--)
+   {
+      if(!pivots[i].isHigh)
+      {
+         // Verificar que no esté en la barra actual
+         int shift = iBarShift(_Symbol, _Period, pivots[i].point.time);
+         if(shift > 0)
+         {
+            lowIndex = i;
+            return pivots[i].point.price;
+         }
+      }
+   }
+   
+   return 0.0;
+}
+
+//+------------------------------------------------------------------+
+//| Función para obtener el último HIGH confirmado del ZigZag        |
+//+------------------------------------------------------------------+
+double GetLastConfirmedHigh(int &highIndex)
+{
+   highIndex = -1;
+   
+   // Buscar el último HIGH confirmado (no el current extreme si es HIGH)
+   for(int i = pivotCount - 1; i >= 0; i--)
+   {
+      if(pivots[i].isHigh)
+      {
+         // Verificar que no esté en la barra actual
+         int shift = iBarShift(_Symbol, _Period, pivots[i].point.time);
+         if(shift > 0)
+         {
+            highIndex = i;
+            return pivots[i].point.price;
+         }
+      }
+   }
+   
+   return 0.0;
+}
+
+//+------------------------------------------------------------------+
+//| Obtener la dirección actual del ZigZag                           |
+//+------------------------------------------------------------------+
+string GetZigZagDirection()
+{
+   // Si no hay pivots, usar la dirección actual
+   if(pivotCount == 0)
+      return currentDirection;
+      
+   // Si hay currentExtreme, la dirección es la actual
+   if(currentExtreme != 0.0)
+      return currentDirection;
+      
+   // Si no, la dirección es opuesta al último pivot
+   if(pivots[pivotCount - 1].isHigh)
+      return "down"; // Si el último fue HIGH, ahora vamos hacia abajo
+   else
+      return "up";   // Si el último fue LOW, ahora vamos hacia arriba
+}
+
+//+------------------------------------------------------------------+
+//| Obtener el valor mínimo del ZigZag cuando va hacia abajo         |
+//+------------------------------------------------------------------+
+double GetZigZagMinimum()
+{
+   double minimum = DBL_MAX;
+   
+   // Si estamos yendo hacia abajo, considerar el currentExtreme
+   if(currentDirection == "down" && currentExtreme > 0)
+      minimum = currentExtreme;
+      
+   // Buscar el mínimo entre los últimos LOWs
+   for(int i = pivotCount - 1; i >= 0 && i >= pivotCount - 10; i--)
+   {
+      if(!pivots[i].isHigh && pivots[i].point.price < minimum)
+         minimum = pivots[i].point.price;
+   }
+   
+   return minimum == DBL_MAX ? 0.0 : minimum;
+}
+
+//+------------------------------------------------------------------+
+//| Obtener el valor máximo del ZigZag cuando va hacia arriba        |
+//+------------------------------------------------------------------+
+double GetZigZagMaximum()
+{
+   double maximum = 0.0;
+   
+   // Si estamos yendo hacia arriba, considerar el currentExtreme
+   if(currentDirection == "up" && currentExtreme > 0)
+      maximum = currentExtreme;
+      
+   // Buscar el máximo entre los últimos HIGHs
+   for(int i = pivotCount - 1; i >= 0 && i >= pivotCount - 10; i--)
+   {
+      if(pivots[i].isHigh && pivots[i].point.price > maximum)
+         maximum = pivots[i].point.price;
+   }
+   
+   return maximum;
+}
+
+//+------------------------------------------------------------------+
+//| NUEVO: Validar que el tiempo seleccionado sea válido para el TF  |
+//+------------------------------------------------------------------+
+bool ValidateSelectedTime()
+{
+   if(selectedStartTime <= 0) return false;
+   
+   // Verificar que el tiempo esté dentro del rango de barras disponibles
+   datetime firstBarTime = iTime(_Symbol, _Period, iBars(_Symbol, _Period) - 1);
+   datetime lastBarTime = iTime(_Symbol, _Period, 0);
+   
+   if(selectedStartTime < firstBarTime || selectedStartTime > lastBarTime)
+   {
+      Print("Selected time ", TimeToString(selectedStartTime), " is outside chart range");
+      Print("Chart range: ", TimeToString(firstBarTime), " to ", TimeToString(lastBarTime));
+      return false;
+   }
+   
+   return true;
+}
+
+
+//+------------------------------------------------------------------+
+//| Scan function - traducción exacta del Pine Script                |
+//+------------------------------------------------------------------+
+void Scan(double src, bool isHigh, datetime time)
+{
+   double openPrice = iOpen(_Symbol, _Period, iBarShift(_Symbol, _Period, time));
+   double closePrice = iClose(_Symbol, _Period, iBarShift(_Symbol, _Period, time));
+   int currentBarShift = iBarShift(_Symbol, _Period, time);
+   
+   // 1. PRIMER EXTREMO - Inicialización
+   if(currentExtreme == 0.0)
+   {
+      currentExtreme = src;
+      currentExtremeTime = time;
+      closeTime = time;
+      currentBarIndex = currentBarShift;
+      currentDirection = isHigh ? "up" : "down";
+      
+      // Inicializar también el pending
+      pendingDirection = currentDirection;
+      pendingExtreme = currentExtreme;
+      pendingExtremeTime = currentExtremeTime;
+      pendingBarIndex = currentBarIndex;
+      
+      return;
+   }
+   
+   // 2. MISMA DIRECCIÓN - Actualizar extremo si es mejor
+   bool sameDirectionUpdate = false;
+   
+   if(isHigh && currentDirection == "up" && src > currentExtreme)
+   {
+      // Nuevo HIGH más alto en dirección UP
+      currentExtreme = src;
+      currentExtremeTime = time;
+      closeTime = time;
+      currentBarIndex = currentBarShift;
+      sameDirectionUpdate = true;
+   }
+   else if(!isHigh && currentDirection == "down" && src < currentExtreme)
+   {
+      // Nuevo LOW más bajo en dirección DOWN
+      currentExtreme = src;
+      currentExtremeTime = time;
+      closeTime = time;
+      currentBarIndex = currentBarShift;
+      sameDirectionUpdate = true;
+   }
+   
+   if(sameDirectionUpdate)
+   {
+      // Actualizar también el pending
+      pendingExtreme = currentExtreme;
+      pendingExtremeTime = currentExtremeTime;
+      pendingBarIndex = currentBarIndex;
+      return;
+   }
+   
+   // 3. CAMBIO DE DIRECCIÓN - Confirmar pivote anterior y comenzar nuevo extremo
+   bool directionChange = false;
+   
+   if(isHigh && currentDirection == "down")
+   {
+      // Cambio de DOWN a UP
+      directionChange = true;
+   }
+   else if(!isHigh && currentDirection == "up")
+   {
+      // Cambio de UP a DOWN  
+      directionChange = true;
+   }
+   
+   if(directionChange)
+   {
+      // Confirmar el pivote anterior SOLO si no está en la barra actual
+      if(currentBarIndex > 0) // No está en barra actual
+      {
+         AddPivot(currentExtreme, currentExtremeTime, closeTime, currentDirection == "up", 
+                  iOpen(_Symbol, _Period, currentBarIndex),
+                  iClose(_Symbol, _Period, currentBarIndex));
+      }
+      
+      // Iniciar nuevo extremo
+      currentExtreme = src;
+      currentExtremeTime = time;
+      closeTime = time;
+      currentBarIndex = currentBarShift;
+      currentDirection = isHigh ? "up" : "down";
+      
+      // Actualizar pending
+      pendingDirection = currentDirection;
+      pendingExtreme = currentExtreme;
+      pendingExtremeTime = currentExtremeTime;
+      pendingBarIndex = currentBarIndex;
+      
+      return;
+   }
+   
+   // 4. LÓGICA ADICIONAL - Pine Script behavior
+   // Si no hay cambio de dirección pero el source es significativo, 
+   // mantener el extremo actual pero verificar si necesitamos actualizar pending
+   
+   // Para dirección UP, siempre mantener el HIGH más alto encontrado hasta ahora
+   if(currentDirection == "up" && isHigh)
+   {
+      if(src > pendingExtreme)
+      {
+         pendingExtreme = src;
+         pendingExtremeTime = time;
+         pendingBarIndex = currentBarShift;
+         
+         // Si es significativamente mejor, actualizar current también
+         if(src > currentExtreme)
+         {
+            currentExtreme = src;
+            currentExtremeTime = time;
+            currentBarIndex = currentBarShift;
+         }
+      }
+   }
+   
+   // Para dirección DOWN, siempre mantener el LOW más bajo encontrado hasta ahora
+   if(currentDirection == "down" && !isHigh)
+   {
+      if(src < pendingExtreme)
+      {
+         pendingExtreme = src;
+         pendingExtremeTime = time;
+         pendingBarIndex = currentBarShift;
+         
+         // Si es significativamente mejor, actualizar current también
+         if(src < currentExtreme)
+         {
+            currentExtreme = src;
+            currentExtremeTime = time;
+            currentBarIndex = currentBarShift;
+         }
+      }
+   }
+}
+
+
+
+//+------------------------------------------------------------------+
+//| Add pivot to array - VERSIÓN MEJORADA                           |
+//+------------------------------------------------------------------+
+void AddPivot(double price, datetime time, datetime closeT, bool isHigh, 
+              double openPrice, double closePrice)
+{
+   if(pivotCount >= ArraySize(pivots))
+      ArrayResize(pivots, pivotCount + 1000);
+   
+   SPivot newPivot;
+   newPivot.point.price = price;
+   newPivot.point.time = time;
+   newPivot.open = openPrice;
+   newPivot.close = closePrice;
+   newPivot.isHigh = isHigh;
+   newPivot.isHigher = false;
+   newPivot.openLineName = "";
+   newPivot.closeLineName = "";
+   newPivot.openLineCreated = false;
+   newPivot.closeLineCreated = false;
+   newPivot.openPrice = openPrice;
+   newPivot.closePrice = closePrice;
+   newPivot.closeBreaksPivot = false;
+   newPivot.closeBreaksClose = false;
+   newPivot.isConfirmed = false; // Añadir confirmación inicial
+   
+   // Verificar si es higher/lower
+   if(pivotCount > 0)
+   {
+      SPivot lastPivot = pivots[pivotCount - 1];
+      newPivot.isHigher = isHigh ? (price > lastPivot.point.price) : (price < lastPivot.point.price);
+   }
+   
+   pivots[pivotCount] = newPivot;
+   pivotCount++;
+
+   // NUEVO: Verificar inmediatamente las líneas existentes cuando se añade un nuevo pivote
+   if(InpEnableLineSystem && InpUse4PointPattern && lineCount > 0)
+   {
+      bool linesRemoved = false;
+      
+      // Verificar todas las líneas basadas en patrones con el nuevo pivote
+      for(int i = lineCount - 1; i >= 0; i--)
+      {
+         if(!srLines[i].isPatternBased)
+            continue;
+            
+         bool shouldRemove = false;
+         
+         if(srLines[i].isSupport && newPivot.isHigh) // Línea de SOPORTE + nuevo HIGH
+         {
+             // Nuevo HIGH invalida soporte si está POR DEBAJO de val_i4
+             if(newPivot.point.price < srLines[i].val_i4_price)
+             {
+                 shouldRemove = true;
+                 if(InpShowPatternInfo)
+                     Print("New HIGH invalidates SUPPORT: HIGH (", 
+                           DoubleToString(newPivot.point.price, _Digits), 
+                           ") < val_i4 (", DoubleToString(srLines[i].val_i4_price, _Digits), ")");
+             }
+         }
+         else if(!srLines[i].isSupport && !newPivot.isHigh) // Línea de RESISTENCIA + nuevo LOW
+         {
+             // Nuevo LOW invalida resistencia si está POR ENCIMA de val_i4
+             if(newPivot.point.price > srLines[i].val_i4_price)
+             {
+                 shouldRemove = true;
+                 if(InpShowPatternInfo)
+                     Print("New LOW invalidates RESISTANCE: LOW (", 
+                           DoubleToString(newPivot.point.price, _Digits), 
+                           ") > val_i4 (", DoubleToString(srLines[i].val_i4_price, _Digits), ")");
+             }
+         }
+         
+         if(shouldRemove)
+         {
+            ObjectDelete(0, srLines[i].lineObjectName);
+            for(int j = i; j < lineCount - 1; j++)
+            {
+               srLines[j] = srLines[j + 1];
+            }
+            lineCount--;
+            linesRemoved = true;
+         }
+      }
+      
+      if(linesRemoved)
+      {
+         UpdateVisibleLines();
+         ChartRedraw();
+      }
+   }
+
+   // Remove old pivots if array is too large
+   if(pivotCount > 1000)
+   {
+      // Desplazar todos los pivotes una posición hacia atrás
+      for(int i = 0; i < pivotCount - 1; i++)
+      {
+         pivots[i] = pivots[i + 1];
+      }
+      pivotCount--;
+      
+      // Ajustar índices en las líneas S/R
+      for(int i = 0; i < lineCount; i++)
+      {
+         if(srLines[i].pivotIndex > 0)
+            srLines[i].pivotIndex--;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Update pivot with new price                                      |
+//+------------------------------------------------------------------+
+void UpdatePivot(int index, double newPrice, datetime newTime)
+{
+   // Si el pivote ya está confirmado, no actualizar
+   if(pivots[index].isConfirmed)
+      return;
+
+   // Actualizar precio y tiempo del pivote
+   pivots[index].point.price = newPrice;
+   pivots[index].point.time = newTime;
+
+   // Nuevo: Confirmar pivote si han pasado suficientes barras
+   int barsSincePivot = iBarShift(_Symbol, _Period, pivots[index].point.time, false);
+   int barsTotal = Bars(_Symbol, _Period, 0, TimeCurrent());
+
+   if((barsTotal - barsSincePivot) >= InpConfirmBars)
+   {
+      pivots[index].isConfirmed = true;
+   }
+}
+
+
+//+------------------------------------------------------------------+
+//| Draw ZigZag lines in buffer - VERSIÓN OPTIMIZADA ANTI-PARPADEO  |
+//+------------------------------------------------------------------+
+void DrawZigZag(int rates_total)
+{
+   if(!InpDisplayZigZag)
+      return;
+      
+   if(pivotCount == 0 && currentExtreme == 0.0)
+      return;
+   // Cooldown más permisivo
+   datetime currentTime = TimeCurrent();
+   if(currentTime - lastZZDrawTime < 0.2)  // Reducir a 0.2 segundos
+   {
+      // Usar caché si existe
+      if(ArraySize(cachedZigZagHigh) == rates_total)
+      {
+         for(int i = 0; i < rates_total; i++)
+         {
+            ZigZagHigh[i] = cachedZigZagHigh[i];
+            ZigZagLow[i] = cachedZigZagLow[i];
+         }
+      }
+      return;
+   }
+   lastZZDrawTime = currentTime;   
+   
+   
+   // === NUEVO: Sistema de caché anti-parpadeo ===
+   // Solo redibujar si hay cambios significativos
+   bool hasSignificantChange = false;
+   
+   // Verificar si hay cambios en los pivotes
+   if(pivotCount != lastDrawnPivotCount)
+      hasSignificantChange = true;
+   
+   // Verificar si el currentExtreme cambió significativamente (más de 5 puntos)
+   if(MathAbs(currentExtreme - lastDrawnExtreme) > _Point * 15)
+      hasSignificantChange = true;
+   
+   // Verificar si cambió el tiempo del extremo actual
+   if(currentExtremeTime != lastDrawnExtremeTime)
+      hasSignificantChange = true;
+   
+   // Forzar redibujado inicial
+   if(zigzagNeedsRedraw)
+      hasSignificantChange = true;
+   
+   // Si no hay cambios significativos, usar el caché
+   if(!hasSignificantChange)
+   {
+      // Copiar del caché a los buffers
+      if(ArraySize(cachedZigZagHigh) == rates_total)
+      {
+         for(int i = 0; i < rates_total; i++)
+         {
+            ZigZagHigh[i] = cachedZigZagHigh[i];
+            ZigZagLow[i] = cachedZigZagLow[i];
+         }
+      }
+      return; // Salir sin redibujar
+   }
+   
+   // === REDIBUJAR SOLO CUANDO ES NECESARIO ===
+   
+   // Resize caché si es necesario
+   if(ArraySize(cachedZigZagHigh) != rates_total)
+   {
+      ArrayResize(cachedZigZagHigh, rates_total);
+      ArrayResize(cachedZigZagLow, rates_total);
+   }
+   
+   // Limpiar buffers y caché
+   for(int i = 0; i < rates_total; i++)
+   {
+      ZigZagHigh[i] = 0.0;
+      ZigZagLow[i] = 0.0;
+      cachedZigZagHigh[i] = 0.0;
+      cachedZigZagLow[i] = 0.0;
+   }
+   
+   // Dibujar puntos de pivotes confirmados
+   for(int i = 0; i < pivotCount; i++)
+   {
+      int shift = iBarShift(_Symbol, _Period, pivots[i].point.time);
+      if(shift >= 0 && shift < rates_total)
+      {
+         if(pivots[i].isHigh)
+         {
+            ZigZagHigh[shift] = pivots[i].point.price;
+            cachedZigZagHigh[shift] = pivots[i].point.price;
+         }
+         else
+         {
+            ZigZagLow[shift] = pivots[i].point.price;
+            cachedZigZagLow[shift] = pivots[i].point.price;
+         }
+      }
+   }
+   
+   // Current extreme
+   if(currentExtreme != 0.0)
+   {
+      int currentShift = iBarShift(_Symbol, _Period, currentExtremeTime);
+      if(currentShift >= 0 && currentShift < rates_total)
+      {
+         if(currentDirection == "up")
+         {
+            ZigZagHigh[currentShift] = currentExtreme;
+            cachedZigZagHigh[currentShift] = currentExtreme;
+         }
+         else
+         {
+            ZigZagLow[currentShift] = currentExtreme;
+            cachedZigZagLow[currentShift] = currentExtreme;
+         }
+      }
+   }
+   
+   // Actualizar variables de control
+   lastDrawnExtreme = currentExtreme;
+   lastDrawnExtremeTime = currentExtremeTime;
+   lastDrawnPivotCount = pivotCount;
+   zigzagNeedsRedraw = false;
+   
+   // Buffer de dirección ZigZag
+   if(currentDirection == "up")
+      ZigZagDirectionBuffer[0] = 1.0;
+   else if(currentDirection == "down")
+      ZigZagDirectionBuffer[0] = -1.0;
+   else
+      ZigZagDirectionBuffer[0] = 0.0;
+   
+   if(rates_total > 1)
+      ZigZagDirectionBuffer[1] = ZigZagDirectionBuffer[0];
+}
+
+//+------------------------------------------------------------------+
+//| Interpolate line between two pivots                              |
+//+------------------------------------------------------------------+
+void InterpolateLine(int shift1, int shift2, const SPivot &pivot1, const SPivot &pivot2)
+{
+   if(shift1 <= shift2)
+      return;
+      
+   double price1 = pivot1.point.price;
+   double price2 = pivot2.point.price;
+   
+   // Calculate price step
+   double priceStep = (price2 - price1) / (shift1 - shift2);
+   
+   // Fill intermediate points
+   for(int shift = shift2 + 1; shift < shift1; shift++)
+   {
+      double interpolatedPrice = price2 + priceStep * (shift - shift2);
+      
+      // Determine which buffer to use based on direction
+      if(pivot1.isHigh && !pivot2.isHigh) // High to Low
+      {
+         ZigZagHigh[shift] = interpolatedPrice;
+      }
+      else if(!pivot1.isHigh && pivot2.isHigh) // Low to High
+      {
+         ZigZagLow[shift] = interpolatedPrice;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Create time line                                             |
+//+------------------------------------------------------------------+
+void CreateTimeLine()
+{
+   if(!InpUseInteractiveTime) return;
+   
+   datetime lineTime = selectedStartTime;
+   if(lineTime <= 0)
+   {
+      // Solo crear línea si hay un tiempo válido seleccionado
+      return;
+   }
+   
+   // Check if line already exists
+   if(ObjectFind(0, timeLineName) >= 0)
+   {
+      // Just update the position
+      ObjectSetInteger(0, timeLineName, OBJPROP_TIME, lineTime);
+      ObjectSetInteger(0, timeLineName, OBJPROP_SELECTABLE, !timeFrozen);
+   }
+   else
+   {
+      // Create new line
+      if(ObjectCreate(0, timeLineName, OBJ_VLINE, 0, lineTime, 0))
+      {
+         ObjectSetInteger(0, timeLineName, OBJPROP_COLOR, clrWhite);
+         ObjectSetInteger(0, timeLineName, OBJPROP_STYLE, STYLE_DOT);
+         ObjectSetInteger(0, timeLineName, OBJPROP_WIDTH, 2);
+         ObjectSetInteger(0, timeLineName, OBJPROP_SELECTABLE, !timeFrozen);
+         ObjectSetInteger(0, timeLineName, OBJPROP_SELECTED, false);
+         ObjectSetString(0, timeLineName, OBJPROP_TOOLTIP, 
+                        timeFrozen ? "Press T to unfreeze" :
+                        "Drag to change start time | Click to set position | Press R to reset | Press T to freeze");
+         ObjectSetInteger(0, timeLineName, OBJPROP_ZORDER, 1000);
+         ObjectSetInteger(0, timeLineName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Update start time based on line position                     |
+//+------------------------------------------------------------------+
+void UpdateStartTimeFromLine()
+{
+   if(!InpUseInteractiveTime || timeFrozen) return;
+   
+   if(ObjectFind(0, timeLineName) >= 0)
+   {
+      datetime newTime = (datetime)ObjectGetInteger(0, timeLineName, OBJPROP_TIME);
+      if(newTime != selectedStartTime)
+      {
+         selectedStartTime = newTime;
+         
+         // AÑADIR: Guardar inmediatamente en variable global
+         string varNameTime = "ZZ_SelectedTime_" + _Symbol;
+         GlobalVariableSet(varNameTime, selectedStartTime);
+         
+         // Refrescar solo cada 500ms durante el drag
+         static datetime lastRefreshTime = 0;
+         if(TimeCurrent() - lastRefreshTime > 0.5)
+         {
+            RefreshAllLines();
+            lastRefreshTime = TimeCurrent();
+         }
+         ChartRedraw();
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Refresh all lines based on new start time                   |
+//+------------------------------------------------------------------+
+void RefreshAllLines()
+{
+    if(!InpEnableLineSystem) return;
+    
+    DeactivateTradingLevels();
+    
+    // NO marcar líneas como inactivas - solo actualizar visibilidad
+    datetime effectiveStart = GetEffectiveStartTime();
+    
+    if(InpUse4PointPattern)
+    {
+        // Escanear patrones sin destruir líneas existentes
+        ScanPatternsWithoutDestruction();
+    }
+    
+    // Solo actualizar visibilidad, NO eliminar líneas
+    UpdateVisibleLines();
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Get effective start time                                     |
+//+------------------------------------------------------------------+
+datetime GetEffectiveStartTime()
+{
+   if(InpUseInteractiveTime)
+   {
+      // Primero verificar si hay un tiempo guardado
+      string varNameTime = "ZZ_SelectedTime_" + _Symbol;
+      if(GlobalVariableCheck(varNameTime))
+      {
+         datetime savedTime = (datetime)GlobalVariableGet(varNameTime);
+         if(savedTime > 0)
+         {
+            selectedStartTime = savedTime;  // Actualizar la variable local
+            return savedTime;
+         }
+      }
+      
+      // Si no, usar el tiempo seleccionado actual
+      if(selectedStartTime > 0)
+         return selectedStartTime;
+   }
+   
+   // Finalmente, usar el parámetro de entrada
+   if(InpStartTime > 0)
+      return InpStartTime;
+   
+   return 0;
+}
+
+
+
+//+------------------------------------------------------------------+
+//| PHASE 2: Check for 4-Point Resistance Pattern                     |
+//+------------------------------------------------------------------+
+bool Check4PointResistancePattern(int currentPivotIdx, S4PointPattern &pattern)
+{
+   pattern.isValid = false;
+   
+   // Need at least 5 pivots
+   if(currentPivotIdx < 4 || currentPivotIdx >= pivotCount)
+      return false;
+      
+   // Get the 5 pivots (i-4 to i)
+   SPivot val_i = pivots[currentPivotIdx - 4];   // Oldest
+   SPivot val_i1 = pivots[currentPivotIdx - 3];
+   SPivot val_i2 = pivots[currentPivotIdx - 2];  // Local LOW
+   SPivot val_i3 = pivots[currentPivotIdx - 1];  // HIGH donde va la línea
+   SPivot val_i4 = pivots[currentPivotIdx];      // Newest
+   
+   // Verify alternating pattern
+   bool alternatingPattern = (val_i.isHigh != val_i1.isHigh) && 
+                           (val_i1.isHigh != val_i2.isHigh) && 
+                           (val_i2.isHigh != val_i3.isHigh) && 
+                           (val_i3.isHigh != val_i4.isHigh);
+   
+   if(!alternatingPattern)
+      return false;
+   
+   // For resistance: val_i2 should be LOW, val_i3 should be HIGH
+   if(val_i2.isHigh || !val_i3.isHigh)
+      return false;
+   
+   // NUEVA VALIDACIÓN: Chequeo de últimos pivots confirmados
+   if(pivotCount >= 2)
+   {
+      SPivot lastPivot = pivots[pivotCount - 1];      // pivot(pivotCount-1)
+      SPivot secondLastPivot = pivots[pivotCount - 2]; // pivot(pivotCount-2)
+      // NUEVA VALIDACIÓN ADICIONAL: Si el último pivot está por encima de val_i3, no dibujar resistencia
+      if(lastPivot.point.price > val_i3.point.price)
+      {
+         if(InpShowPatternInfo)
+            Print("Resistance pattern rejected: Last pivot (", 
+                  DoubleToString(lastPivot.point.price, _Digits), 
+                  ") > val_i3 (", DoubleToString(val_i3.point.price, _Digits), ")");
+         return false;
+      }
+      // Condición 1: cuando pivot(pivotCount-1) sea LOW para que haya líneas de resistencia,
+      // este valor tiene que ser menor del de val_i4 de estructura de resistencia
+      if(!lastPivot.isHigh) // Es LOW
+      {
+         if(lastPivot.point.price >= val_i4.point.price)
+         {
+            if(InpShowPatternInfo)
+               Print("Resistance pattern rejected: Last pivot LOW (", 
+                     DoubleToString(lastPivot.point.price, _Digits), 
+                     ") >= val_i4 (", DoubleToString(val_i4.point.price, _Digits), ")");
+            return false;
+         }
+      }
+      
+      // Condición 2: cuando pivot(pivotCount-2) sea LOW para que haya líneas de resistencia,
+      // este valor tiene que ser menor del de val_i4 de estructura de resistencia
+      if(!secondLastPivot.isHigh) // Es LOW
+      {
+         if(secondLastPivot.point.price >= val_i4.point.price)
+         {
+            if(InpShowPatternInfo)
+               Print("Resistance pattern rejected: Second last pivot LOW (", 
+                     DoubleToString(secondLastPivot.point.price, _Digits), 
+                     ") >= val_i4 (", DoubleToString(val_i4.point.price, _Digits), ")");
+            return false;
+         }
+      }
+   }
+   
+   // NUEVA LÓGICA: Verificar condiciones según dirección del ZigZag
+   string zigzagDirection = GetZigZagDirection();
+   bool conditionMet = false;
+   
+   if(zigzagDirection == "up")
+   {
+      // ZigZag va hacia arriba: último LOW confirmado < val_i4
+      int lastLowIndex;
+      double lastConfirmedLow = GetLastConfirmedLow(lastLowIndex);
+      
+      if(lastConfirmedLow > 0 && lastConfirmedLow < val_i4.point.price)
+      {
+         conditionMet = true;
+         if(InpShowPatternInfo)
+            Print("Resistance: ZigZag UP, Last LOW (", lastConfirmedLow, ") < val_i4 (", val_i4.point.price, ")");
+      }
+   }
+   else if(zigzagDirection == "down")
+   {
+      // ZigZag va hacia abajo: valor mínimo < val_i4
+      double zigzagMin = GetZigZagMinimum();
+      
+      if(zigzagMin > 0 && zigzagMin < val_i4.point.price)
+      {
+         conditionMet = true;
+         if(InpShowPatternInfo)
+            Print("Resistance: ZigZag DOWN, Min (", zigzagMin, ") < val_i4 (", val_i4.point.price, ")");
+      }
+   }
+   
+   if(!conditionMet)
+      return false;
+   
+   // Check basic condition for resistance pattern
+   bool isLocalLow = false;
+   
+   if(InpSimplePatternMode)
+   {
+      isLocalLow = val_i2.point.price < val_i1.point.price && 
+                   val_i2.point.price < val_i3.point.price;
+   }
+   else
+   {
+      isLocalLow = val_i2.point.price < val_i1.point.price && 
+                   val_i2.point.price < val_i3.point.price && 
+                   val_i1.point.price < val_i3.point.price && 
+                   val_i4.point.price < val_i2.point.price && 
+                   val_i4.point.price < val_i3.point.price;
+   }
+   
+   if(!isLocalLow)
+      return false;
+   // NUEVA VALIDACIÓN: Verificar contra CurrentExtreme
+   if(currentExtreme > 0)
+   {
+      // Si ZigZag va hacia arriba (currentExtreme es un HIGH)
+      if(currentDirection == "up")
+      {
+         // Si el current HIGH es mayor que val_i3, la resistencia ya fue invalidada
+         if(currentExtreme > val_i3.point.price)
+         {
+            if(InpShowPatternInfo)
+               Print("Resistance pattern rejected: CurrentExtreme (", 
+                     DoubleToString(currentExtreme, _Digits), 
+                     ") > val_i3 (", DoubleToString(val_i3.point.price, _Digits), ")");
+            return false;
+         }
+      }
+   }
+   // Pattern validated
+   pattern.isValid = true;
+   pattern.isResistance = true;
+   pattern.pivotIndex = currentPivotIdx - 1;  // val_i3
+   pattern.val_i4_price = val_i4.point.price;  // Guardar val_i4
+   
+   // Get open/close of val_i3 bar
+   int shift = iBarShift(_Symbol, _Period, val_i3.point.time);
+   if(shift >= 0)
+   {
+      double open = iOpen(_Symbol, _Period, shift);
+      double close = iClose(_Symbol, _Period, shift);
+      pattern.linePrice = MathMax(open, close);
+      pattern.pivotTime = val_i3.point.time;
+   }
+   else
+   {
+      pattern.isValid = false;
+   }
+
+   pattern.val_i3_price = pivots[currentPivotIdx - 1].point.price; // val_i3 es currentPivotIdx - 1
+
+
+   return pattern.isValid;
+}
+
+//+------------------------------------------------------------------+
+//| PHASE 2: Check for 4-Point Support Pattern                        |
+//+------------------------------------------------------------------+
+bool Check4PointSupportPattern(int currentPivotIdx, S4PointPattern &pattern)
+{
+   pattern.isValid = false;
+   
+   // Need at least 5 pivots
+   if(currentPivotIdx < 4 || currentPivotIdx >= pivotCount)
+      return false;
+      
+   // Get the 5 pivots (i-4 to i)
+   SPivot val_i = pivots[currentPivotIdx - 4];   // Oldest
+   SPivot val_i1 = pivots[currentPivotIdx - 3];
+   SPivot val_i2 = pivots[currentPivotIdx - 2];  // Local HIGH
+   SPivot val_i3 = pivots[currentPivotIdx - 1];  // LOW donde va la línea
+   SPivot val_i4 = pivots[currentPivotIdx];      // Newest
+   
+   // Verify alternating pattern
+   bool alternatingPattern = (val_i.isHigh != val_i1.isHigh) && 
+                           (val_i1.isHigh != val_i2.isHigh) && 
+                           (val_i2.isHigh != val_i3.isHigh) && 
+                           (val_i3.isHigh != val_i4.isHigh);
+   
+   if(!alternatingPattern)
+      return false;
+   
+   // For support: val_i2 should be HIGH, val_i3 should be LOW
+   if(!val_i2.isHigh || val_i3.isHigh)
+      return false;
+   
+   // NUEVA VALIDACIÓN: Chequeo de últimos pivots confirmados
+   if(pivotCount >= 2)
+   {
+      SPivot lastPivot = pivots[pivotCount - 1];      // pivot(pivotCount-1)
+      SPivot secondLastPivot = pivots[pivotCount - 2]; // pivot(pivotCount-2)
+      // NUEVA VALIDACIÓN ADICIONAL: Si el último pivot está por debajo de val_i3, no dibujar soporte
+      if(lastPivot.point.price < val_i3.point.price)
+      {
+         if(InpShowPatternInfo)
+            Print("Support pattern rejected: Last pivot (", 
+                  DoubleToString(lastPivot.point.price, _Digits), 
+                  ") < val_i3 (", DoubleToString(val_i3.point.price, _Digits), ")");
+         return false;
+      }
+      // Condición 1: cuando pivot(pivotCount-1) sea HIGH para que haya líneas de soporte,
+      // este valor tiene que ser mayor del de val_i4 de estructura de soporte
+      if(lastPivot.isHigh) // Es HIGH
+      {
+         if(lastPivot.point.price <= val_i4.point.price)
+         {
+            if(InpShowPatternInfo)
+               Print("Support pattern rejected: Last pivot HIGH (", 
+                     DoubleToString(lastPivot.point.price, _Digits), 
+                     ") <= val_i4 (", DoubleToString(val_i4.point.price, _Digits), ")");
+            return false;
+         }
+      }
+      
+      // Condición 2: cuando pivot(pivotCount-2) sea HIGH para que haya líneas de soporte,
+      // este valor tiene que ser mayor del de val_i4 de estructura de soporte
+      if(secondLastPivot.isHigh) // Es HIGH
+      {
+         if(secondLastPivot.point.price <= val_i4.point.price)
+         {
+            if(InpShowPatternInfo)
+               Print("Support pattern rejected: Second last pivot HIGH (", 
+                     DoubleToString(secondLastPivot.point.price, _Digits), 
+                     ") <= val_i4 (", DoubleToString(val_i4.point.price, _Digits), ")");
+            return false;
+         }
+      }
+   }
+   
+   // NUEVA LÓGICA: Verificar condiciones según dirección del ZigZag
+   string zigzagDirection = GetZigZagDirection();
+   bool conditionMet = false;
+   
+   if(zigzagDirection == "down")
+   {
+      // ZigZag va hacia abajo: último HIGH confirmado > val_i4
+      int lastHighIndex;
+      double lastConfirmedHigh = GetLastConfirmedHigh(lastHighIndex);
+      
+      if(lastConfirmedHigh > 0 && lastConfirmedHigh > val_i4.point.price)
+      {
+         conditionMet = true;
+         if(InpShowPatternInfo)
+            Print("Support: ZigZag DOWN, Last HIGH (", lastConfirmedHigh, ") > val_i4 (", val_i4.point.price, ")");
+      }
+   }
+   else if(zigzagDirection == "up")
+   {
+      // ZigZag va hacia arriba: valor máximo > val_i4
+      double zigzagMax = GetZigZagMaximum();
+      if(zigzagMax > 0 && zigzagMax > val_i4.point.price)
+      {
+         conditionMet = true;
+         if(InpShowPatternInfo)
+            Print("Support: ZigZag UP, Max (", zigzagMax, ") > val_i4 (", val_i4.point.price, ")");
+      }
+   }
+   
+   if(!conditionMet)
+      return false;
+   
+   // Check basic condition for support pattern
+   bool isLocalHigh = false;
+   
+   if(InpSimplePatternMode)
+   {
+      isLocalHigh = val_i2.point.price > val_i1.point.price && 
+                    val_i2.point.price > val_i3.point.price;
+   }
+   else
+   {
+      isLocalHigh = val_i2.point.price > val_i1.point.price && 
+                    val_i2.point.price > val_i3.point.price && 
+                    val_i1.point.price > val_i3.point.price && 
+                    val_i4.point.price > val_i2.point.price && 
+                    val_i4.point.price > val_i3.point.price;
+   }
+   
+   if(!isLocalHigh)
+      return false;
+   
+   // NUEVA VALIDACIÓN: Verificar contra CurrentExtreme
+   if(currentExtreme > 0)
+   {
+      // Si ZigZag va hacia abajo (currentExtreme es un LOW)
+      if(currentDirection == "down")
+      {
+         // Si el current LOW es menor que val_i3, el soporte ya fue invalidado
+         if(currentExtreme < val_i3.point.price)
+         {
+            if(InpShowPatternInfo)
+               Print("Support pattern rejected: CurrentExtreme (", 
+                     DoubleToString(currentExtreme, _Digits), 
+                     ") < val_i3 (", DoubleToString(val_i3.point.price, _Digits), ")");
+            return false;
+         }
+      }
+   }
+
+   // Pattern validated
+   pattern.isValid = true;
+   pattern.isResistance = false;
+   pattern.pivotIndex = currentPivotIdx - 1;  // val_i3
+   pattern.val_i4_price = val_i4.point.price;  // Guardar val_i4
+   
+   // Get open/close of val_i3 bar
+   int shift = iBarShift(_Symbol, _Period, val_i3.point.time);
+   if(shift >= 0)
+   {
+      double open = iOpen(_Symbol, _Period, shift);
+      double close = iClose(_Symbol, _Period, shift);
+      pattern.linePrice = MathMin(open, close);
+      pattern.pivotTime = val_i3.point.time;
+   }
+   else
+   {
+      pattern.isValid = false;
+   }
+   pattern.val_i3_price = pivots[currentPivotIdx - 1].point.price; // val_i3 es currentPivotIdx - 1
+
+   return pattern.isValid;
+}
+
+//+------------------------------------------------------------------+
+//| PHASE 2: Create line from detected pattern (versión pro)         |
+//+------------------------------------------------------------------+
+void CreatePatternLine(const S4PointPattern &pattern)
+{
+   // 1. Validación del patrón y del índice de pivote
+   if(!pattern.isValid || pattern.pivotIndex < 0 || pattern.pivotIndex >= pivotCount)
+      return;
+
+   // 2. Limita el número máximo de líneas (limpieza por antigüedad)
+   if(lineCount >= InpMaxTotalLines)
+   {
+      RemoveOldestLines(10);
+   }
+
+   // 3. Filtrado por tiempo (soporte a modo interactivo)
+   datetime effectiveStart = GetEffectiveStartTime();
+   if(effectiveStart != 0 && pattern.pivotTime < effectiveStart)
+      return;
+
+   // 4. Obtén el pivote asociado
+   SPivot pivot = pivots[pattern.pivotIndex];
+
+   if(InpShowPatternInfo)
+   {
+      Print("Creating ", pattern.isResistance ? "RESISTANCE" : "SUPPORT",
+            " line at price: ", DoubleToString(pattern.linePrice, _Digits),
+            " from pivot index: ", pattern.pivotIndex);
+   }
+
+   // 5. Crear la línea S/R y añadirla al array
+   int prevLineCount = lineCount;
+   CreateSRLine(
+      pivot, 
+      pattern.linePrice, 
+      true,                  // isOpenLine
+      pattern.pivotIndex, 
+      true,                  // isPatternBased
+      pattern.val_i4_price, 
+      pattern.val_i3_price
+   );
+
+   // 6. Marca como activa la última línea creada si realmente se añadió
+   if(lineCount > prevLineCount)
+      srLines[lineCount-1].isActive = true;
+}
+
+
+//+------------------------------------------------------------------+
+//| NEW: Remove oldest lines to maintain performance                 |
+//+------------------------------------------------------------------+
+void RemoveOldestLines(int count)
+{
+   if(lineCount <= count) return;
+   
+   // Remove 'count' oldest lines
+   for(int i = 0; i < count && i < lineCount; i++)
+   {
+      ObjectDelete(0, srLines[i].lineObjectName);
+   }
+   
+   // Shift remaining lines
+   for(int i = count; i < lineCount; i++)
+   {
+      srLines[i - count] = srLines[i];
+   }
+   
+   lineCount -= count;
+   
+   Print("Removed ", count, " oldest lines. Total lines: ", lineCount);
+}
+
+
+int totalInvalidatedLines = 0; // Contador global de líneas invalidadas
+
+//+------------------------------------------------------------------+
+//| SISTEMA SIMPLE: Limpiar líneas cuando currentExtreme cruza val_i3|
+//+------------------------------------------------------------------+
+void CleanupLinesByPrice()
+{
+    if(!InpEnableLineSystem || lineCount == 0 || currentExtreme == 0)
+        return;
+        
+    int removedCount = 0;
+    
+    for(int i = lineCount - 1; i >= 0; i--)
+    {
+        if(!srLines[i].isPatternBased) continue;
+        
+        bool shouldRemove = false;
+        
+        if(srLines[i].isSupport)
+        {
+            // SOPORTE: borra si currentExtreme < val_i3
+            if(currentExtreme < srLines[i].val_i3_price)
+            {
+                shouldRemove = true;
+            }
+            // O si el último pivot HIGH está por DEBAJO de val_i4
+            else if(pivotCount > 0)
+            {
+                SPivot lastPivot = pivots[pivotCount - 1];
+                if(lastPivot.isHigh && lastPivot.point.price < srLines[i].val_i4_price)
+                {
+                    shouldRemove = true;
+                    if(InpShowPatternInfo)
+                        Print("🗑️ Borrando SOPORTE: Nuevo HIGH (", DoubleToString(lastPivot.point.price, _Digits),
+                              ") < val_i4 (", DoubleToString(srLines[i].val_i4_price, _Digits), ")");
+                }
+            }
+        }
+        else // Resistencia
+        {
+            // RESISTENCIA: borra si currentExtreme > val_i3
+            if(currentExtreme > srLines[i].val_i3_price)
+            {
+                shouldRemove = true;
+            }
+            // O si el último pivot LOW está por ENCIMA de val_i4
+            else if(pivotCount > 0)
+            {
+                SPivot lastPivot = pivots[pivotCount - 1];
+                if(!lastPivot.isHigh && lastPivot.point.price > srLines[i].val_i4_price)
+                {
+                    shouldRemove = true;
+                    if(InpShowPatternInfo)
+                        Print("🗑️ Borrando RESISTENCIA: Nuevo LOW (", DoubleToString(lastPivot.point.price, _Digits),
+                              ") > val_i4 (", DoubleToString(srLines[i].val_i4_price, _Digits), ")");
+                }
+            }
+        }
+        
+        if(shouldRemove)
+        {
+            ObjectDelete(0, srLines[i].lineObjectName);
+            for(int j = i; j < lineCount - 1; j++)
+                srLines[j] = srLines[j + 1];
+            lineCount--;
+            removedCount++;
+        }
+    }
+    
+    if(removedCount > 0)
+    {
+        if(InpShowPatternInfo)
+            Print("✅ CleanupLinesByPrice: Eliminadas ", removedCount, " líneas invalidadas");
+        UpdateVisibleLines();
+    }
+}
+
+
+//+------------------------------------------------------------------+
+//| NEW: Cleanup all line objects                                    |
+//+------------------------------------------------------------------+
+void CleanupAllLines()
+{
+   // Delete ONLY objects that belong to THIS symbol
+   int deleted = 0;
+   int totalObjects = ObjectsTotal(0);
+   
+   for(int i = totalObjects - 1; i >= 0; i--)
+   {
+      string objName = ObjectName(0, i);
+      // Check if object belongs to this symbol's prefix
+      if(StringFind(objName, linePrefix) == 0)
+      {
+         ObjectDelete(0, objName);
+         deleted++;
+      }
+   }
+   
+   // Reset line array
+   lineCount = 0;
+   lineCounter = 0;
+   
+   // Clear pivot line references
+   for(int i = 0; i < pivotCount; i++)
+   {
+      pivots[i].openLineName = "";
+      pivots[i].closeLineName = "";
+      pivots[i].openLineCreated = false;
+      pivots[i].closeLineCreated = false;
+   }
+   
+   Print("Cleaned up ", deleted, " line objects");
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Create line from pivot                                       |
+//+------------------------------------------------------------------+
+void CreateLineFromPivot(int pivotIdx)
+{
+   if(!InpEnableLineSystem || pivotIdx >= pivotCount)
+      return;
+      
+   SPivot pivot = pivots[pivotIdx];
+   
+   // Don't create lines for pivots on the current unclosed bar
+   int currentBar = iBarShift(_Symbol, _Period, pivot.point.time);
+   if(currentBar == 0)
+      return;
+      
+   // Check if we've reached the maximum number of lines
+   if(lineCount >= InpMaxTotalLines)
+   {
+      // Remove oldest lines
+      RemoveOldestLines(10); // Remove 10 oldest lines
+   }
+   
+   // Check start time filter using effective start time
+   datetime effectiveStart = GetEffectiveStartTime();
+   if(effectiveStart != 0 && pivot.point.time < effectiveStart)
+      return;
+   
+   // Get bar data
+   int shift = iBarShift(_Symbol, _Period, pivot.point.time);
+   if(shift < 0) return;
+   
+   double open = iOpen(_Symbol, _Period, shift);
+   double close = iClose(_Symbol, _Period, shift);
+   
+   // Update pivot with open/close prices
+   pivots[pivotIdx].openPrice = open;
+   pivots[pivotIdx].closePrice = close;
+   
+   // Create line based on pivot type
+   if(pivot.isHigh)
+   {
+      // For HIGH pivot: create resistance at MAX(open, close)
+      double linePrice = MathMax(open, close);
+      CreateSRLine(pivot, linePrice, true, pivotIdx, false, 0, 0); // Fix: Add val_i3_price parameter
+   }
+   else
+   {
+      // For LOW pivot: create support at MIN(open, close)
+      double linePrice = MathMin(open, close);
+      CreateSRLine(pivot, linePrice, true, pivotIdx, false, 0, 0); // Fix: Add val_i3_price parameter
+   }
+}
+
+//+------------------------------------------------------------------+
+//| NEW: Create individual S/R line (versión pro robusta)            |
+//+------------------------------------------------------------------+
+void CreateSRLine(const SPivot &pivot, double price, bool isOpenLine, int pivotIdx, bool isPatternBased = false, double val_i4_price = 0, double val_i3_price = 0)
+{
+   
+   if(price <= 0 || lineCount >= InpMaxTotalLines)
+   {
+       if(InpDebugMode)
+           Print("❌ Cannot create line: price=", price, " count=", lineCount);
+       return;
+   }
+   // 1. Validación de precio robusta
+   if(price <= 0 || price > SymbolInfoDouble(_Symbol, SYMBOL_BID) * 10)
+   {
+      Print("Invalid price for line creation: ", price);
+      return;
+   }
+
+   // 2. Verificar si ya existe una línea muy cercana (máxima seguridad: compara soporte/resistencia, tiempo y patrón)
+   for(int i = 0; i < lineCount; i++)
+   {
+      if(MathAbs(srLines[i].linePrice - price) < _Point &&
+         srLines[i].isSupport == !pivot.isHigh &&
+         srLines[i].isPatternBased == isPatternBased &&
+         MathAbs(srLines[i].pivotTime - pivot.point.time) < PeriodSeconds(_Period))
+      {
+         // Ya existe una línea muy similar y del mismo tipo
+         return;
+      }
+   }
+
+   // 3. Límite máximo de líneas (seguridad extra)
+   if(lineCount >= InpMaxTotalLines)
+      return;
+
+   // 4. Gestionar capacidad del array
+   if(lineCount >= ArraySize(srLines))
+      ArrayResize(srLines, lineCount + 100); // Incremento pequeño para eficiencia
+
+   // 5. Crear estructura de línea y rellenar campos
+   SSRLine newLine;
+   newLine.pivotTime      = pivot.point.time;
+   newLine.pivotPrice     = pivot.point.price;
+   newLine.linePrice      = price;
+   newLine.isSupport      = !pivot.isHigh;
+   newLine.isVisible      = false;
+   newLine.isOpenLine     = isOpenLine;
+   newLine.creationTime   = TimeCurrent();
+   newLine.touchCount     = 0;
+   newLine.hasActiveOrder = false;
+   newLine.pivotIndex     = pivotIdx;
+   newLine.isPatternBased = isPatternBased;
+   newLine.val_i4_price   = val_i4_price;
+   newLine.val_i3_price   = val_i3_price;
+   newLine.isActive       = true; // CLAVE: activa siempre al crear
+
+   // 6. Nombre único y seguro para el objeto de línea
+   newLine.lineObjectName = linePrefix + IntegerToString(lineCounter++) + "_T" + 
+                        IntegerToString(pivot.point.time) + "_P" + 
+                        IntegerToString((int)(price * 100000));
+
+   // 7. Crear la línea gráfica en el chart (oculta al inicio, se hace visible con UpdateVisibleLines)
+   datetime endTime = pivot.point.time + PeriodSeconds(_Period) * 10000;
+   bool lineCreated = ObjectCreate(0, newLine.lineObjectName, OBJ_TREND, 0, pivot.point.time, price, endTime, price);
+   if(lineCreated)
+   {
+      ObjectSetInteger(0, newLine.lineObjectName, OBJPROP_COLOR, newLine.isSupport ? InpSupportColor : InpResistanceColor);
+      ObjectSetInteger(0, newLine.lineObjectName, OBJPROP_WIDTH, InpLineWidthSR);
+      ObjectSetInteger(0, newLine.lineObjectName, OBJPROP_STYLE, STYLE_DOT);
+      ObjectSetInteger(0, newLine.lineObjectName, OBJPROP_RAY_RIGHT, true);
+      ObjectSetInteger(0, newLine.lineObjectName, OBJPROP_RAY_LEFT, false);
+      ObjectSetInteger(0, newLine.lineObjectName, OBJPROP_TIMEFRAMES, OBJ_NO_PERIODS);
+      ObjectSetInteger(0, newLine.lineObjectName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, newLine.lineObjectName, OBJPROP_BACK, true);
+
+      // 8. Añadir al array
+      srLines[lineCount] = newLine;
+      lineCount++;
+
+      // 9. Referencia de nombre en el pivot
+      if(isOpenLine)
+         pivots[pivotIdx].openLineName = newLine.lineObjectName;
+      else
+         pivots[pivotIdx].closeLineName = newLine.lineObjectName;
+   }
+   else
+   {
+      Print("Failed to create line object: ", newLine.lineObjectName);
+   }
+}
+
+
+//+------------------------------------------------------------------+
+//| NEW: Update visible lines based on current price                 |
+//+------------------------------------------------------------------+
+void UpdateVisibleLines()
+{
+   if(!InpEnableLineSystem || lineCount == 0)
+      return;
+   
+   // EVITA REFRESCOS EXCESIVOS pero permite actualizaciones necesarias
+   static ulong lastFullUpdate = 0;
+   ulong now = GetTickCount();
+   static bool forceNextUpdate = false;
+   
+   // Verificar si alguna línea visible no está en el gráfico
+   for(int i = 0; i < lineCount; i++)
+   {
+      if(srLines[i].isVisible && ObjectFind(0, srLines[i].lineObjectName) < 0)
+      {
+         forceNextUpdate = true;
+         break;
+      }
+   }
+   
+   if(!forceNextUpdate && now - lastFullUpdate < 100) // 100 ms = 10 Hz
+      return;
+   
+   forceNextUpdate = false;
+      
+      
+   lastFullUpdate = now;
+
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   // ---- MODO DEBUG: Mostrar TODAS las líneas ----
+   if(InpDebugMode)
+   {
+      datetime effectiveStart = GetEffectiveStartTime();
+      int visibleCount = 0;
+      for(int i = 0; i < lineCount && i < InpMaxTotalLines; i++)
+      {
+         if(effectiveStart != 0 && srLines[i].pivotTime < effectiveStart)
+            continue;
+         if(ObjectFind(0, srLines[i].lineObjectName) >= 0)
+         {
+            SCrossInfo crossInfo = DetectLastCross(srLines[i].linePrice, InpCrossTolerance);
+
+            ENUM_LINE_STYLE lineStyle =
+               (crossInfo.type == CROSS_WICK) ? STYLE_DASH : STYLE_DOT;
+
+            if(!srLines[i].isVisible || 
+               ObjectGetInteger(0, srLines[i].lineObjectName, OBJPROP_STYLE) != lineStyle)
+            {
+               // ⬇️ CAMBIO 1: antes: OBJ_ALL_PERIODS
+               ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_TIMEFRAMES, GetCurrentTFMask());
+               ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_COLOR,
+                  srLines[i].isSupport ? InpSupportColor : InpResistanceColor);
+               ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_WIDTH, InpLineWidthSR);
+               ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_STYLE, lineStyle);
+               ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_RAY_RIGHT, true);
+               ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_RAY_LEFT, false);
+            }
+            srLines[i].isVisible = true;
+            visibleCount++;
+         }
+      }
+      Comment("DEBUG MODE - All Lines Visible\n"
+              "Total Lines: ", lineCount,
+              " | Visible: ", visibleCount,
+              "\nCurrent Price: ", DoubleToString(currentPrice, _Digits),
+              "\nStart Time: ", effectiveStart > 0 ? TimeToString(effectiveStart) : "All");
+      ChartRedraw();
+      return;
+   }
+
+   // -------- GESTIÓN VISUAL OPTIMIZADA SIN PARPADEO --------
+   LineDistance supports[], resistances[];
+   ArrayResize(supports, 0); ArrayResize(resistances, 0);
+
+   datetime effectiveStart = GetEffectiveStartTime();
+   
+   bool previousVisibility[];
+   ArrayResize(previousVisibility, lineCount);
+   for(int i = 0; i < lineCount; i++)
+      previousVisibility[i] = srLines[i].isVisible;
+
+   for(int i = 0; i < lineCount; i++)
+   {
+      if(effectiveStart != 0 && srLines[i].pivotTime < effectiveStart)
+         continue;
+
+      LineDistance ld;
+      ld.index = i;
+      ld.distance = MathAbs(srLines[i].linePrice - currentPrice);
+
+      if(srLines[i].isSupport)
+      {
+         int n = ArraySize(supports); 
+         ArrayResize(supports, n+1); 
+         supports[n]=ld;
+      }
+      else
+      {
+         int n = ArraySize(resistances); 
+         ArrayResize(resistances, n+1); 
+         resistances[n]=ld;
+      }
+   }
+
+   // Ordenar por distancia (soportes)
+   for(int i = 0; i < ArraySize(supports)-1; i++)
+      for(int j = i+1; j < ArraySize(supports); j++)
+         if(supports[j].distance < supports[i].distance)
+         { 
+            LineDistance t = supports[i]; 
+            supports[i]=supports[j]; 
+            supports[j]=t; 
+         }
+   // Ordenar por distancia (resistencias)
+   for(int i = 0; i < ArraySize(resistances)-1; i++)
+      for(int j = i+1; j < ArraySize(resistances); j++)
+         if(resistances[j].distance < resistances[i].distance)
+         { 
+            LineDistance t = resistances[i]; 
+            resistances[i]=resistances[j]; 
+            resistances[j]=t; 
+         }
+
+   bool shouldBeVisible[];
+   ArrayResize(shouldBeVisible, lineCount);
+   ArrayInitialize(shouldBeVisible, false);
+
+   int supportShown = 0;
+   for(int i = 0; i < ArraySize(supports) && supportShown < InpMaxSupportLines; i++)
+   {
+      int idx = supports[i].index;
+      if(idx >= 0 && idx < lineCount)
+      {
+         shouldBeVisible[idx] = true;
+         supportShown++;
+      }
+   }
+   
+   int resistanceShown = 0;
+   for(int i = 0; i < ArraySize(resistances) && resistanceShown < InpMaxResistanceLines; i++)
+   {
+      int idx = resistances[i].index;
+      if(idx >= 0 && idx < lineCount)
+      {
+         shouldBeVisible[idx] = true;
+         resistanceShown++;
+      }
+   }
+
+   bool needRedraw = false;
+   
+   for(int i = 0; i < lineCount; i++)
+   {
+      if(ObjectFind(0, srLines[i].lineObjectName) < 0)
+         continue;
+         
+      if(shouldBeVisible[i])
+      {
+         if(!srLines[i].isVisible)
+         {
+            SCrossInfo crossInfo = DetectLastCross(srLines[i].linePrice, InpCrossTolerance);
+            ENUM_LINE_STYLE lineStyle = (crossInfo.type == CROSS_WICK) ? STYLE_DASH : STYLE_DOT;
+            
+            // ⬇️ CAMBIO 2: antes: OBJ_ALL_PERIODS
+            ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_TIMEFRAMES, GetCurrentTFMask());
+            ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_COLOR, 
+                           srLines[i].isSupport ? InpSupportColor : InpResistanceColor);
+            ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_WIDTH, InpLineWidthSR);
+            ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_STYLE, lineStyle);
+            ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_RAY_RIGHT, true);
+            ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_RAY_LEFT, false);
+            
+            srLines[i].isVisible = true;
+            needRedraw = true;
+         }
+         else
+         {
+            SCrossInfo crossInfo = DetectLastCross(srLines[i].linePrice, InpCrossTolerance);
+            ENUM_LINE_STYLE newStyle = (crossInfo.type == CROSS_WICK) ? STYLE_DASH : STYLE_DOT;
+            ENUM_LINE_STYLE currentStyle = (ENUM_LINE_STYLE)ObjectGetInteger(
+                                           0, srLines[i].lineObjectName, OBJPROP_STYLE);
+            
+            if(currentStyle != newStyle)
+            {
+               ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_STYLE, newStyle);
+               needRedraw = true;
+            }
+         }
+      }
+      else
+      {
+         if(srLines[i].isVisible)
+         {
+            ObjectSetInteger(0, srLines[i].lineObjectName, OBJPROP_TIMEFRAMES, OBJ_NO_PERIODS);
+            srLines[i].isVisible = false;
+            needRedraw = true;
+         }
+      }
+   }
+   
+   if(needRedraw)
+      ChartRedraw();
+}
+
+// Devuelve la máscara de visibilidad para el timeframe actual
+int GetCurrentTFMask()
+{
+   switch(_Period)
+   {
+      case PERIOD_M1:   return OBJ_PERIOD_M1;
+      case PERIOD_M2:   return OBJ_PERIOD_M2;
+      case PERIOD_M3:   return OBJ_PERIOD_M3;
+      case PERIOD_M4:   return OBJ_PERIOD_M4;
+      case PERIOD_M5:   return OBJ_PERIOD_M5;
+      case PERIOD_M6:   return OBJ_PERIOD_M6;
+      case PERIOD_M10:  return OBJ_PERIOD_M10;
+      case PERIOD_M12:  return OBJ_PERIOD_M12;
+      case PERIOD_M15:  return OBJ_PERIOD_M15;
+      case PERIOD_M20:  return OBJ_PERIOD_M20;
+      case PERIOD_M30:  return OBJ_PERIOD_M30;
+      case PERIOD_H1:   return OBJ_PERIOD_H1;
+      case PERIOD_H2:   return OBJ_PERIOD_H2;
+      case PERIOD_H3:   return OBJ_PERIOD_H3;
+      case PERIOD_H4:   return OBJ_PERIOD_H4;
+      case PERIOD_H6:   return OBJ_PERIOD_H6;
+      case PERIOD_H8:   return OBJ_PERIOD_H8;
+      case PERIOD_H12:  return OBJ_PERIOD_H12;
+      case PERIOD_D1:   return OBJ_PERIOD_D1;
+      case PERIOD_W1:   return OBJ_PERIOD_W1;
+      case PERIOD_MN1:  return OBJ_PERIOD_MN1;
+      default:          return OBJ_ALL_PERIODS; // fallback
+   }
+}
+
+//+------------------------------------------------------------------+
+//| PHASE 2.5: Check if price touches any S/R line                   |
+//+------------------------------------------------------------------+
+void CheckLineTouches()
+{
+   if(!InpEnableLineSystem || lineCount == 0) return;
+   
+   // NUEVO: Si ya hay líneas activas, no buscar nuevas
+   if(activeTrading.isActive) return;
+   
+   // MODIFICADO: Usar tick actual en lugar de vela cerrada
+   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double high = iHigh(_Symbol, _Period, 0);
+   double low = iLow(_Symbol, _Period, 0);
+   
+   // Arrays to store touched lines
+   int touchedSupports[];
+   int touchedResistances[];
+   ArrayResize(touchedSupports, 0);
+   ArrayResize(touchedResistances, 0);
+   
+   // Check all visible lines for touches
+   for(int i = 0; i < lineCount; i++)
+   {
+      if(!srLines[i].isVisible || !srLines[i].isPatternBased) continue;
+      
+      // NUEVO: Solo considerar líneas que NO han sido cruzadas (estilo != DOT)
+      if(ObjectFind(0, srLines[i].lineObjectName) >= 0)
+      {
+         ENUM_LINE_STYLE currentStyle = (ENUM_LINE_STYLE)ObjectGetInteger(0, 
+                                        srLines[i].lineObjectName, OBJPROP_STYLE);
+         
+         // Solo activar trading en líneas sólidas o con el estilo original
+         if(currentStyle != STYLE_DOT && currentStyle != InpLineStyleSR)
+            continue;
+      }
+      
+      double linePrice = srLines[i].linePrice;
+      bool touched = false;
+      
+      // MODIFICADO: Verificar toque instantáneo con precio actual
+      if(srLines[i].isSupport)
+      {
+         // Para soporte: verificar si el precio actual o el low de la vela toca la línea
+         if(currentBid <= linePrice || low <= linePrice)
+            touched = true;
+      }
+      else
+      {
+         // Para resistencia: verificar si el precio actual o el high de la vela toca la línea
+         if(currentAsk >= linePrice || high >= linePrice)
+            touched = true;
+      }
+      
+      if(touched)
+      {
+         srLines[i].touchCount++;
+         
+         if(srLines[i].isSupport)
+         {
+            int size = ArraySize(touchedSupports);
+            ArrayResize(touchedSupports, size + 1);
+            touchedSupports[size] = i;
+         }
+         else
+         {
+            int size = ArraySize(touchedResistances);
+            ArrayResize(touchedResistances, size + 1);
+            touchedResistances[size] = i;
+         }
+      }
+   }
+   
+   // Process touches - find best line
+   int bestLineIndex = -1;
+   
+   if(ArraySize(touchedSupports) > 0)
+   {
+      // For supports, find the lowest value
+      double lowestPrice = DBL_MAX;
+      for(int i = 0; i < ArraySize(touchedSupports); i++)
+      {
+         int idx = touchedSupports[i];
+         if(srLines[idx].linePrice < lowestPrice)
+         {
+            lowestPrice = srLines[idx].linePrice;
+            bestLineIndex = idx;
+         }
+      }
+   }
+   else if(ArraySize(touchedResistances) > 0)
+   {
+      // For resistances, find the highest value
+      double highestPrice = 0;
+      for(int i = 0; i < ArraySize(touchedResistances); i++)
+      {
+         int idx = touchedResistances[i];
+         if(srLines[idx].linePrice > highestPrice)
+         {
+            highestPrice = srLines[idx].linePrice;
+            bestLineIndex = idx;
+         }
+      }
+   }
+   
+   // Activate trading levels for the best line
+   if(bestLineIndex >= 0)
+   {
+      ActivateTradingLevels(bestLineIndex);
+      // NUEVO: Forzar redraw inmediato
+      ChartRedraw();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| PHASE 2.5: Activate trading levels (SL/TP)                       |
+//+------------------------------------------------------------------+
+void ActivateTradingLevels(int lineIndex)
+{
+   if (lineIndex < 0 || lineIndex >= lineCount) return;
+
+   // Deactivate any existing levels first
+   DeactivateTradingLevels();
+   
+   // Si ya existen líneas activas, salir
+   if(activeTrading.isActive) return;
+
+   // Set active trading info using direct array access
+   activeTrading.isActive = true;
+   activeTrading.lineIndex = lineIndex;
+   activeTrading.entryPrice = srLines[lineIndex].linePrice;
+   activeTrading.slPrice = srLines[lineIndex].val_i3_price;
+   activeTrading.tpPrice = srLines[lineIndex].val_i4_price;
+   activeTrading.isLong = srLines[lineIndex].isSupport;
+   activeTrading.activationTime = TimeCurrent();
+
+   // Calculate distances
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+
+   if (activeTrading.isLong)
+   {
+      activeTrading.pipsToSL = (int)((activeTrading.entryPrice - activeTrading.slPrice) / point);
+      activeTrading.pipsToTP = (int)((activeTrading.tpPrice - activeTrading.entryPrice) / point);
+   }
+   else
+   {
+      activeTrading.pipsToSL = (int)((activeTrading.slPrice - activeTrading.entryPrice) / point);
+      activeTrading.pipsToTP = (int)((activeTrading.entryPrice - activeTrading.tpPrice) / point);
+   }
+
+   // Calculate R:R ratio
+   if (activeTrading.pipsToSL > 0)
+      activeTrading.riskRewardRatio = (double)activeTrading.pipsToTP / (double)activeTrading.pipsToSL;
+   else
+      activeTrading.riskRewardRatio = 0;
+
+   // NUEVO: Necesitamos encontrar el tiempo de val_i3 y val_i4
+   datetime val_i3_time = 0;
+   datetime val_i4_time = 0;
+
+   // Buscar el pivote para obtener los tiempos
+   int pivotIndex = srLines[lineIndex].pivotIndex;
+   if (pivotIndex > 0 && pivotIndex < pivotCount)
+   {
+      val_i3_time = pivots[pivotIndex].point.time;  // val_i3
+      if (pivotIndex + 1 < pivotCount)
+         val_i4_time = pivots[pivotIndex + 1].point.time;  // val_i4
+   }
+
+   // Si no encontramos los tiempos, usar el tiempo del pivot de la línea
+   if (val_i3_time == 0) val_i3_time = srLines[lineIndex].pivotTime;
+   if (val_i4_time == 0) val_i4_time = srLines[lineIndex].pivotTime;
+
+
+   if (InpShowPatternInfo)
+   {
+      Print("Trading levels activated - ", activeTrading.isLong ? "LONG" : "SHORT",
+            " Entry: ", DoubleToString(activeTrading.entryPrice, digits),
+            " SL: ", DoubleToString(activeTrading.slPrice, digits),
+            " TP: ", DoubleToString(activeTrading.tpPrice, digits),
+            " R:R: ", DoubleToString(activeTrading.riskRewardRatio, 2));
+   }
+   
+   // Forzar redraw inmediato para mostrar las líneas
+   ChartRedraw();
+}
+
+//+------------------------------------------------------------------+
+//| PHASE 2.5: Deactivate trading levels                             |
+//+------------------------------------------------------------------+
+void DeactivateTradingLevels()
+{
+   if(!activeTrading.isActive) return;
+   
+   // Reset active trading
+   activeTrading.isActive = false;
+   activeTrading.lineIndex = -1;
+}
+
+
+//+------------------------------------------------------------------+
+//| PHASE 2.5: Check if SL or TP levels have been crossed            |
+//+------------------------------------------------------------------+
+void CheckTradingLevelsCrossed()
+{
+    if (!activeTrading.isActive)
+        return;
+
+    // Usamos el precio actual (bid o ask según sea soporte o resistencia)
+    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+    // Obtener los precios de SL y TP
+    double slPrice = activeTrading.slPrice;
+    double tpPrice = activeTrading.tpPrice;
+
+    // Verificar si el precio actual cruza SL o TP
+    bool crossedSL = false;
+    bool crossedTP = false;
+    
+    double tolerance = _Point * 5; // 5 pips de tolerancia
+
+    if (activeTrading.isLong)
+    {
+        // Long trade: stop loss abajo, take profit arriba
+        if (currentBid <= slPrice)
+            crossedSL = true;
+        else if (currentAsk >= tpPrice)
+            crossedTP = true;
+    }
+    else
+    {
+        // Short trade: stop loss arriba, take profit abajo
+        if (currentAsk >= slPrice)
+            crossedSL = true;
+        else if (currentBid <= tpPrice)
+            crossedTP = true;
+    }
+
+       // Desactivar si hay cruce
+   if (crossedSL || crossedTP)
+   {
+       // Desactivar trading activo
+       DeactivateTradingLevels();
+   
+       // Forzar actualización del gráfico
+       ChartRedraw();
+   }
+
+}
+
+//+------------------------------------------------------------------+
+//| Comment consolidado CON diagnóstico de líneas DOTTED            |
+//+------------------------------------------------------------------+
+void BuildConsolidatedComment()
+{
+    // Control de frecuencia más estricto
+    datetime currentTime = TimeCurrent();
+    if(!forceCommentUpdate && currentTime - lastCommentUpdate < 3)
+        return;
+        
+    // Variables con nombres únicos para evitar conflictos
+    static double lastCommentPrice = 0;
+    static string lastCommentZZDirection = "";
+    static double lastCommentExtreme = 0;
+    static int lastCommentPivotCount = 0;
+    static int lastCommentLineCount = 0;
+    
+    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    
+    // Solo actualizar si hay cambios significativos
+    bool hasSignificantChange = (
+        MathAbs(currentPrice - lastCommentPrice) > _Point * 10 ||
+        currentDirection != lastCommentZZDirection ||
+        currentExtreme != lastCommentExtreme ||
+        pivotCount != lastCommentPivotCount ||
+        lineCount != lastCommentLineCount ||
+        forceCommentUpdate
+    );
+    
+    if(!hasSignificantChange)
+        return;
+    
+    // Actualizar variables de control
+    lastCommentPrice = currentPrice;
+    lastCommentZZDirection = currentDirection;
+    lastCommentExtreme = currentExtreme;
+    lastCommentPivotCount = pivotCount;
+    lastCommentLineCount = lineCount;
+    
+    string comment = "";
+    
+    // ===== LÍNEA 1: Versión, símbolo e información básica =====
+    comment += "JFL_v14 | " + _Symbol + " | " + DoubleToString(currentPrice, _Digits);
+    comment += " | Direction: " + currentDirection;
+    
+    // Current Extreme
+    if(currentExtreme > 0)
+        comment += " | Extreme: " + DoubleToString(currentExtreme, _Digits);
+    else
+        comment += " | Extreme: None";
+    
+    comment += "\n";
+    
+    
+    
+    // ===== LÍNEA 3: INFORMACIÓN DE SEÑAL (SIMPLIFICADA) =====
+    // Buscar señal válida
+    datetime effectiveStart = GetEffectiveStartTime();
+    double bestEntry = 0;
+    double bestSL = 0;
+    double bestTP = 0;
+    int bestSignal = 0;
+    bool foundValidLine = false;
+    
+    for(int i = 0; i < lineCount; i++)
+    {
+        if(!srLines[i].isVisible || !srLines[i].isPatternBased) continue;
+        
+        if(effectiveStart != 0 && srLines[i].pivotTime < effectiveStart)
+            continue;
+        
+        double linePrice = srLines[i].linePrice;
+        double distance = MathAbs(currentPrice - linePrice);
+        
+        double minDistancePips = 10;
+        if(distance < minDistancePips * _Point) continue;
+        
+        SCrossInfo crossInfo = DetectLastCross(srLines[i].linePrice, InpCrossTolerance);
+        if(crossInfo.type != CROSS_BODY) continue; // Solo DOTTED
+        
+        bool isValidForTrading = false;
+        int signalType = 0;
+        
+        if(srLines[i].isSupport && currentPrice > linePrice)
+        {
+            isValidForTrading = true;
+            signalType = 1;
+        }
+        else if(!srLines[i].isSupport && currentPrice < linePrice)
+        {
+            isValidForTrading = true;
+            signalType = -1;
+        }
+        
+        if(isValidForTrading)
+        {
+            bestSignal = signalType;
+            bestEntry = linePrice;
+            bestSL = srLines[i].val_i3_price;
+            bestTP = srLines[i].val_i4_price;
+            foundValidLine = true;
+            break; // Tomar la primera línea válida
+        }
+    }
+    
+    // MOSTRAR SOLO SI HAY SEÑAL VÁLIDA
+    if(foundValidLine)
+    {
+        string signalType = (bestSignal == 1) ? "BUY" : "SELL";
+        comment += "/ SIGNAL: " + signalType + " at " + DoubleToString(bestEntry, _Digits);
+        comment += " | Status: READY TO TRADE\n";
+        
+        // Calcular distancia y R:R
+        int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+        double pipFactor = (digits == 3 || digits == 5) ? 10.0 : 1.0;
+        
+        double distancePips = MathAbs(currentPrice - bestEntry) / _Point / pipFactor;
+        comment += "Distance: " + DoubleToString(distancePips, 1) + " pips";
+        
+        if(bestSL != 0 && bestTP != 0)
+        {
+            double slPips = MathAbs(bestEntry - bestSL) / _Point / pipFactor;
+            double tpPips = MathAbs(bestTP - bestEntry) / _Point / pipFactor;
+            double rrRatio = (slPips > 0) ? MathRound(tpPips / slPips * 100) / 100.0 : 0;
+            
+            comment += " | SL:" + DoubleToString(slPips, 1) + " pips";
+            comment += " | TP:" + DoubleToString(tpPips, 1) + " pips";
+            comment += " | R:R=" + DoubleToString(rrRatio, 2);
+        }
+        comment += "\n";
+    }
+    // SI NO HAY SEÑAL, NO MOSTRAR NADA (líneas eliminadas)
+    
+    
+    
+    // Actualizar solo si realmente cambió
+    if(comment != lastComment)
+    {
+        Comment(comment);
+        lastComment = comment;
+        lastCommentUpdate = currentTime;
+    }
+    
+    // Resetear solo al final
+    forceCommentUpdate = false;
+}
+
+//+------------------------------------------------------------------+
+//| Sistema de logging para detectar problemas ANTES de que exploten|
+//+------------------------------------------------------------------+
+void LogTimeSystemHealth()
+{
+    static datetime lastHealthLog = 0;
+    if(TimeCurrent() - lastHealthLog < 300) return; // Cada 5 minutos
+    
+    string varName = "ZZ_SelectedTime_" + _Symbol;
+    datetime globalTime = GlobalVariableCheck(varName) ? (datetime)GlobalVariableGet(varName) : 0;
+    datetime objectTime = ObjectFind(0, timeLineName) >= 0 ? 
+                         (datetime)ObjectGetInteger(0, timeLineName, OBJPROP_TIME) : 0;
+    
+    // Solo logear si hay problemas
+    if(globalTime > 0 && objectTime > 0 && MathAbs(globalTime - objectTime) > 60)
+    {
+        WriteLog("⚠️ TIME SYNC WARNING: Global=" + TimeToString(globalTime) + 
+                 " Object=" + TimeToString(objectTime) + " Diff=" + IntegerToString(globalTime-objectTime) + "s");
+        
+        if(InpDebugMode)
+        {
+            Print("⚠️ Desincronización detectada:");
+            Print("   Tiempo global: ", TimeToString(globalTime));
+            Print("   Tiempo objeto: ", TimeToString(objectTime));
+            Print("   Diferencia: ", IntegerToString(globalTime-objectTime), " segundos");
+        }
+    }
+    
+    lastHealthLog = TimeCurrent();
+}
+//+------------------------------------------------------------------+
+//| Función WriteLog para el indicador                              |
+//+------------------------------------------------------------------+
+void WriteLog(string text)
+{
+    string fileName = "JFL_v14_Indicator.log";
+    int handle = FileOpen(fileName, FILE_WRITE | FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON);
+    
+    if(handle != INVALID_HANDLE)
+    {
+        // Ir al final del archivo
+        FileSeek(handle, 0, SEEK_END);
+        FileWrite(handle, TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + " - " + text);
+        FileClose(handle);
+    }
+    
+    if(InpDebugMode)
+        Print("INDICATOR LOG: ", text);
+}
+
+//+------------------------------------------------------------------+
+//| Convertir período a string abreviado                             |
+//+------------------------------------------------------------------+
+string ConvertTimeframe(int period)
+{
+   switch(period)
+   {
+      case PERIOD_M1:   return "1m";
+      case PERIOD_M5:   return "5m";
+      case PERIOD_M15:  return "15m";
+      case PERIOD_M30:  return "30m";
+      case PERIOD_H1:   return "1H";
+      case PERIOD_H4:   return "4H";
+      case PERIOD_H12:  return "12H";
+      case PERIOD_D1:   return "D";
+      case PERIOD_W1:   return "W";
+      case PERIOD_MN1:  return "M";
+      default:          return IntegerToString(period);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Devuelve el prefijo único para las etiquetas TF del timeframe actual |
+//+------------------------------------------------------------------+
+string GetTFPrefix()
+{
+   // Incluye símbolo y timeframe numérico (evita colisiones entre TF)
+   return _Symbol + "_" + IntegerToString((int)_Period) + "_TF_";
+}
+
+//+------------------------------------------------------------------+
+//| Limpia etiquetas TF del prefijo antiguo                          |
+//+------------------------------------------------------------------+
+void CleanLegacyTFLabels()
+{
+   string legacy = _Symbol + "_TF_"; // prefijo viejo
+   int total = ObjectsTotal(0);
+   int deleted = 0;
+   for(int i = total - 1; i >= 0; --i)
+   {
+      string name = ObjectName(0, i);
+      // si empieza por el prefijo viejo pero NO por el nuevo, elimínala
+      if(StringFind(name, legacy) == 0 && StringFind(name, GetTFPrefix()) != 0)
+      {
+         ObjectDelete(0, name);
+         deleted++;
+      }
+   }
+   if(InpDebugMode && deleted > 0)
+      Print("CleanLegacyTFLabels: eliminadas ", deleted, " etiquetas antiguas");
+}
+
+//+------------------------------------------------------------------+
+//| Detectar y marcar patrones de 5 velas con TF - CORREGIDO        |
+//+------------------------------------------------------------------+
+void DetectAndMarkTFPatterns(const int rates_total)
+{
+   if(!InpShowTFPatterns) return;
+
+   // Texto según TF actual (M5 -> "5m", etc.)
+   string timeframeText = ConvertTimeframe(_Period);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double minOffset = point * InpTFOffsetMinPips;
+
+   int patternsHighCount = 0;
+   int patternsLowCount = 0;
+   int maxPatternsPerType = 30;
+
+   // Prefijo único por símbolo y timeframe del gráfico
+   string tfPrefix = GetTFPrefix();
+
+   // Buscar patrones en el TF actual
+   for(int i = 2; i < rates_total - 2 && (patternsHighCount < maxPatternsPerType || patternsLowCount < maxPatternsPerType); i++)
+   {
+      double h_i2 = iHigh(_Symbol, _Period, i+2);
+      double h_i1 = iHigh(_Symbol, _Period, i+1);
+      double h_i0 = iHigh(_Symbol, _Period, i);
+      double h_m1 = iHigh(_Symbol, _Period, i-1);
+      double h_m2 = iHigh(_Symbol, _Period, i-2);
+
+      double l_i2 = iLow(_Symbol, _Period, i+2);
+      double l_i1 = iLow(_Symbol, _Period, i+1);
+      double l_i0 = iLow(_Symbol, _Period, i);
+      double l_m1 = iLow(_Symbol, _Period, i-1);
+      double l_m2 = iLow(_Symbol, _Period, i-2);
+
+      datetime timeBar = iTime(_Symbol, _Period, i);
+      double rango = h_i0 - l_i0;
+      double extra_offset = MathMax(rango * InpTFOffsetFactor, minOffset);
+
+      // Pico HIGH
+      if(patternsHighCount < maxPatternsPerType &&
+         h_i2 < h_i1 && h_i1 < h_i0 && h_i0 > h_m1 && h_m1 > h_m2)
+      {
+         string textName = tfPrefix + "H_" + IntegerToString(i) + "_" + IntegerToString((int)timeBar);
+         double price = h_i0 + extra_offset;
+
+         if(ObjectFind(0, textName) < 0)
+         {
+            ObjectCreate(0, textName, OBJ_TEXT, 0, timeBar, price);
+            ObjectSetString(0, textName, OBJPROP_TEXT, timeframeText);
+            ObjectSetInteger(0, textName, OBJPROP_COLOR, InpTFColorUp);
+            ObjectSetInteger(0, textName, OBJPROP_FONTSIZE, InpTFFontSize);
+            ObjectSetString(0, textName, OBJPROP_FONT, "Arial Bold");
+            ObjectSetInteger(0, textName, OBJPROP_ANCHOR, ANCHOR_CENTER);
+            ObjectSetInteger(0, textName, OBJPROP_SELECTABLE, false);
+            // visible solo en el TF actual
+            ObjectSetInteger(0, textName, OBJPROP_TIMEFRAMES, GetCurrentTFMask());
+            patternsHighCount++;
+         }
+      }
+
+      // Valle LOW
+      if(patternsLowCount < maxPatternsPerType &&
+         l_i2 > l_i1 && l_i1 > l_i0 && l_i0 < l_m1 && l_m1 < l_m2)
+      {
+         string textName = tfPrefix + "L_" + IntegerToString(i) + "_" + IntegerToString((int)timeBar);
+         double price = l_i0 - extra_offset;
+
+         if(ObjectFind(0, textName) < 0)
+         {
+            ObjectCreate(0, textName, OBJ_TEXT, 0, timeBar, price);
+            ObjectSetString(0, textName, OBJPROP_TEXT, timeframeText);
+            ObjectSetInteger(0, textName, OBJPROP_COLOR, InpTFColorDown);
+            ObjectSetInteger(0, textName, OBJPROP_FONTSIZE, InpTFFontSize);
+            ObjectSetString(0, textName, OBJPROP_FONT, "Arial Bold");
+            ObjectSetInteger(0, textName, OBJPROP_ANCHOR, ANCHOR_CENTER);
+            ObjectSetInteger(0, textName, OBJPROP_SELECTABLE, false);
+            ObjectSetInteger(0, textName, OBJPROP_TIMEFRAMES, GetCurrentTFMask());
+            patternsLowCount++;
+         }
+      }
+   }
+
+   if(InpDebugMode)
+      Print("TF Patterns (", timeframeText, ") H:", patternsHighCount, " L:", patternsLowCount);
+}
+
+//+------------------------------------------------------------------+
+//| Limpiar todas las etiquetas de TF                               |
+//+------------------------------------------------------------------+
+void CleanTFLabels()
+{
+   string prefix = GetTFPrefix();
+   int deletedCount = 0;
+   int total = ObjectsTotal(0);
+
+   for(int i = total - 1; i >= 0; i--)
+   {
+      string name = ObjectName(0, i);
+      if(StringFind(name, prefix) == 0)
+      {
+         ObjectDelete(0, name);
+         deletedCount++;
+      }
+   }
+   if(InpDebugMode && deletedCount > 0)
+      Print("CleanTFLabels(", ConvertTimeframe(_Period), "): ", deletedCount, " eliminadas");
+}
+
+
+//+------------------------------------------------------------------+
+//| Helper: intersección precisa entre dos pivotes consecutivos      |
+//+------------------------------------------------------------------+
+datetime IntersectionTimeOnSegment(const SPivot &older, const SPivot &newer, double y, double tolPoints)
+{
+   double yA = older.point.price;
+   double yB = newer.point.price;
+
+   // Si el nivel está fuera del rango (con tolerancia), no hay cruce
+   double tol = MathMax(tolPoints * _Point, y * InpCrossTolerance);
+   bool inside = ((y >= MathMin(yA, yB) - tol) && (y <= MathMax(yA, yB) + tol));
+   if(!inside)
+      return 0;
+
+   // Caso toque exacto en A o B
+   if(MathAbs(y - yA) <= tol) return older.point.time;
+   if(MathAbs(y - yB) <= tol) return newer.point.time;
+
+   // Interpolación por tiempo entre A->B
+   double den = (yB - yA);
+   if(den == 0.0) return 0;
+
+   double ratio = (y - yA) / den; // 0..1 sobre A->B
+   if(ratio < 0.0) ratio = 0.0;
+   if(ratio > 1.0) ratio = 1.0;
+
+   long dt = (long)(newer.point.time - older.point.time); // positivo
+   datetime t = (datetime)((long)older.point.time + (long)MathRound(dt * ratio));
+
+   // Garantiza permanecer dentro del segmento
+   if(t <= older.point.time) t = older.point.time + 1;
+   if(t >= newer.point.time) t = newer.point.time - 1;
+
+   return t;
+}
+
+//+------------------------------------------------------------------+
+//| Dibujar línea del extremo actual - VERSIÓN ROBUSTA              |
+//+------------------------------------------------------------------+
+void DrawCurrentExtremeLinePrecise()
+{
+    string lineName = _Symbol + "_CurrentExtremeLine";
+
+    // Condiciones para NO mostrar la línea
+    if(!InpShowCurrentExtremeLine || currentExtreme == 0.0 || pivotCount < 1)
+    {
+        if(ObjectFind(0, lineName) >= 0)
+            ObjectDelete(0, lineName);
+        return;
+    }
+
+    // Calcular intersección mejorada
+    datetime intersectionTime = 0;
+    double targetPrice = currentExtreme;
+    bool foundIntersection = false;
+
+    // Buscar intersección con el ZigZag
+    for(int i = pivotCount - 1; i > 0; i--)
+    {
+        double priceNewer = pivots[i].point.price;
+        double priceOlder = pivots[i - 1].point.price;
+
+        if((priceOlder <= targetPrice && targetPrice <= priceNewer) ||
+           (priceNewer <= targetPrice && targetPrice <= priceOlder))
+        {
+            double priceDiff = priceNewer - priceOlder;
+            if(MathAbs(priceDiff) > _Point)
+            {
+                double ratio = (targetPrice - priceOlder) / priceDiff;
+                ratio = MathMax(0.0, MathMin(1.0, ratio));
+
+                datetime timeOlder = pivots[i - 1].point.time;
+                datetime timeNewer = pivots[i].point.time;
+                long timeDiff = (long)timeNewer - (long)timeOlder;
+
+                intersectionTime = (datetime)((long)timeOlder + (long)(timeDiff * ratio));
+                foundIntersection = true;
+                break;
+            }
+        }
+    }
+
+    // Si no hay intersección exacta
+    if(!foundIntersection)
+    {
+        for(int i = pivotCount - 1; i >= 0; i--)
+        {
+            if((currentDirection == "up" && !pivots[i].isHigh) ||
+               (currentDirection == "down" && pivots[i].isHigh))
+            {
+                intersectionTime = pivots[i].point.time;
+                break;
+            }
+        }
+        if(intersectionTime == 0)
+            intersectionTime = currentExtremeTime - PeriodSeconds(_Period) * InpCurrentExtremeBars;
+    }
+
+    // Validar el tiempo
+    datetime currentTime = TimeCurrent();
+    if(intersectionTime > currentTime)
+        intersectionTime = currentTime - PeriodSeconds(_Period);
+
+    // Definir fin de segmento en currentTime
+    datetime endTime = currentTime;
+
+    // Crear o actualizar la línea como segmento (sin rays)
+    if(ObjectFind(0, lineName) >= 0)
+    {
+        ObjectSetInteger(0, lineName, OBJPROP_RAY_LEFT,  false);
+        ObjectSetInteger(0, lineName, OBJPROP_RAY_RIGHT, false);
+        ObjectSetInteger(0, lineName, OBJPROP_TIME,      0, intersectionTime);
+        ObjectSetDouble(  0, lineName, OBJPROP_PRICE,     0, targetPrice);
+        ObjectSetInteger(0, lineName, OBJPROP_TIME,      1, endTime);
+        ObjectSetDouble(  0, lineName, OBJPROP_PRICE,     1, targetPrice);
+    }
+    else
+    {
+        if(ObjectCreate(0, lineName, OBJ_TREND, 0,
+                        intersectionTime, targetPrice,
+                        endTime,         targetPrice))
+        {
+            ObjectSetInteger(0, lineName, OBJPROP_COLOR,      clrYellow);
+            ObjectSetInteger(0, lineName, OBJPROP_STYLE,      STYLE_DOT);
+            ObjectSetInteger(0, lineName, OBJPROP_WIDTH,      1);
+            ObjectSetInteger(0, lineName, OBJPROP_RAY_LEFT,   false);
+            ObjectSetInteger(0, lineName, OBJPROP_RAY_RIGHT,  false);
+            ObjectSetInteger(0, lineName, OBJPROP_BACK,       true);
+            ObjectSetInteger(0, lineName, OBJPROP_SELECTABLE, false);
+        }
+    }
+}
+
+
+//+------------------------------------------------------------------+
+//| Función auxiliar: Obtener tamaño del pip                        |
+//+------------------------------------------------------------------+
+double PipSize()
+{
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   return (digits == 3 || digits == 5) ? (10.0 * _Point) : _Point;
+}
+
+//+------------------------------------------------------------------+
+//| FUNCIÓN PRINCIPAL: Crear/Actualizar tabla MTF                    |
+//+------------------------------------------------------------------+
+void CreateMTFTable()
+{
+    if(!InpShowMTFTable) {
+        if(mtfTableCreated) RemoveMTFTable();
+        return;
+    }
+
+    // Asegurar que los objetos se dibujen por delante del gráfico
+    ChartSetInteger(0, CHART_FOREGROUND, false);
+
+    mtfTablePrefix = _Symbol + "_MTFTable_";
+    mtfTableX = InpTablePosX;
+    mtfTableY = InpTablePosY + 700;
+
+    // Dimensiones de la tabla
+    int cellWidth = 50;
+    int cellHeight = 25;
+    int headerHeight = 30;
+    int totalWidth = cellWidth * 2;
+    int totalHeight = headerHeight + (cellHeight * 8);
+
+    // Fondo principal opaco delante del gráfico
+    string bgName = mtfTablePrefix + "BG";
+    if(ObjectFind(0, bgName) < 0) {
+        ObjectCreate(0, bgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+    }
+    ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, mtfTableX - 5);
+    ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, mtfTableY - 5);
+    ObjectSetInteger(0, bgName, OBJPROP_XSIZE, totalWidth + 10);
+    ObjectSetInteger(0, bgName, OBJPROP_YSIZE, totalHeight + 10);
+    ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, InpTableBgColor);
+    ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_SUNKEN);
+    ObjectSetInteger(0, bgName, OBJPROP_BORDER_COLOR, InpTableBorderColor);
+    ObjectSetInteger(0, bgName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, bgName, OBJPROP_SELECTABLE, false);
+    ObjectSetInteger(0, bgName, OBJPROP_BACK, false);     // delante del gráfico
+    ObjectSetInteger(0, bgName, OBJPROP_ZORDER, 1000);    // z-order alto
+
+    // Header opaco delante
+    string headerBg = mtfTablePrefix + "HeaderBG";
+    if(ObjectFind(0, headerBg) < 0) {
+        ObjectCreate(0, headerBg, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+    }
+    ObjectSetInteger(0, headerBg, OBJPROP_XDISTANCE, mtfTableX);
+    ObjectSetInteger(0, headerBg, OBJPROP_YDISTANCE, mtfTableY);
+    ObjectSetInteger(0, headerBg, OBJPROP_XSIZE, totalWidth);
+    ObjectSetInteger(0, headerBg, OBJPROP_YSIZE, headerHeight);
+    ObjectSetInteger(0, headerBg, OBJPROP_BGCOLOR, C'35,35,50');
+    ObjectSetInteger(0, headerBg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+    ObjectSetInteger(0, headerBg, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, headerBg, OBJPROP_SELECTABLE, false);
+    ObjectSetInteger(0, headerBg, OBJPROP_BACK, false);
+    ObjectSetInteger(0, headerBg, OBJPROP_ZORDER, 1010);
+
+    // Título del header por delante
+    string headerText = mtfTablePrefix + "Header";
+    if(ObjectFind(0, headerText) < 0) {
+        ObjectCreate(0, headerText, OBJ_LABEL, 0, 0, 0);
+    }
+    ObjectSetInteger(0, headerText, OBJPROP_XDISTANCE, mtfTableX + totalWidth/2);
+    ObjectSetInteger(0, headerText, OBJPROP_YDISTANCE, mtfTableY + headerHeight/2 - 2);
+    ObjectSetString(0, headerText, OBJPROP_TEXT, "MTF");
+    ObjectSetString(0, headerText, OBJPROP_FONT, "Arial Bold");
+    ObjectSetInteger(0, headerText, OBJPROP_FONTSIZE, InpTableFontSize + 1);
+    ObjectSetInteger(0, headerText, OBJPROP_COLOR, clrWhite);
+    ObjectSetInteger(0, headerText, OBJPROP_ANCHOR, ANCHOR_CENTER);
+    ObjectSetInteger(0, headerText, OBJPROP_SELECTABLE, false);
+    ObjectSetInteger(0, headerText, OBJPROP_ZORDER, 2002);
+
+    // Línea separadora del header delante
+    string separator = mtfTablePrefix + "Separator";
+    if(ObjectFind(0, separator) < 0) {
+        ObjectCreate(0, separator, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+    }
+    ObjectSetInteger(0, separator, OBJPROP_XDISTANCE, mtfTableX);
+    ObjectSetInteger(0, separator, OBJPROP_YDISTANCE, mtfTableY + headerHeight);
+    ObjectSetInteger(0, separator, OBJPROP_XSIZE, totalWidth);
+    ObjectSetInteger(0, separator, OBJPROP_YSIZE, 1);
+    ObjectSetInteger(0, separator, OBJPROP_BGCOLOR, InpTableBorderColor);
+    ObjectSetInteger(0, separator, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+    ObjectSetInteger(0, separator, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, separator, OBJPROP_SELECTABLE, false);
+    ObjectSetInteger(0, separator, OBJPROP_BACK, false);
+    ObjectSetInteger(0, separator, OBJPROP_ZORDER, 1500);
+
+    // Actualizar estados de cruces
+    UpdateMTFCrossStates();
+    // NUEVO: alertar si cambió alguna flecha
+    FireMTFArrowChangeAlerts();
+    // Crear filas para cada timeframe
+    string timeframes[] = {"5m", "15m", "1H", "4H", "12H", "D", "W", "M"};
+    int states[] = {mtfCrossState_5m, mtfCrossState_15m, mtfCrossState_1H, mtfCrossState_4H,
+                    mtfCrossState_12H, mtfCrossState_D, mtfCrossState_W, mtfCrossState_M};
+
+    for(int i = 0; i < 8; i++) {
+        int yPos = mtfTableY + headerHeight + (i * cellHeight);
+
+        // Fondo alternado para las filas delante
+        if(i % 2 == 0) {
+            string rowBg = mtfTablePrefix + "RowBg_" + IntegerToString(i);
+            if(ObjectFind(0, rowBg) < 0) {
+                ObjectCreate(0, rowBg, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+            }
+            ObjectSetInteger(0, rowBg, OBJPROP_XDISTANCE, mtfTableX);
+            ObjectSetInteger(0, rowBg, OBJPROP_YDISTANCE, yPos);
+            ObjectSetInteger(0, rowBg, OBJPROP_XSIZE, totalWidth);
+            ObjectSetInteger(0, rowBg, OBJPROP_YSIZE, cellHeight);
+            ObjectSetInteger(0, rowBg, OBJPROP_BGCOLOR, C'30,30,40');
+            ObjectSetInteger(0, rowBg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+            ObjectSetInteger(0, rowBg, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+            ObjectSetInteger(0, rowBg, OBJPROP_SELECTABLE, false);
+            ObjectSetInteger(0, rowBg, OBJPROP_BACK, false);
+            ObjectSetInteger(0, rowBg, OBJPROP_ZORDER, 1005);
+        }
+
+        // Texto del timeframe por delante
+        string tfText = mtfTablePrefix + "TF_" + timeframes[i];
+        if(ObjectFind(0, tfText) < 0) {
+            ObjectCreate(0, tfText, OBJ_LABEL, 0, 0, 0);
+        }
+        ObjectSetInteger(0, tfText, OBJPROP_XDISTANCE, mtfTableX + cellWidth/2);
+        ObjectSetInteger(0, tfText, OBJPROP_YDISTANCE, yPos + cellHeight/2 - 2);
+        ObjectSetString(0, tfText, OBJPROP_TEXT, timeframes[i]);
+        ObjectSetString(0, tfText, OBJPROP_FONT, "Arial");
+        ObjectSetInteger(0, tfText, OBJPROP_FONTSIZE, InpTableFontSize);
+        ObjectSetInteger(0, tfText, OBJPROP_COLOR, InpTableTextColor);
+        ObjectSetInteger(0, tfText, OBJPROP_ANCHOR, ANCHOR_CENTER);
+        ObjectSetInteger(0, tfText, OBJPROP_SELECTABLE, false);
+        ObjectSetInteger(0, tfText, OBJPROP_ZORDER, 2000);
+
+        // Flecha/estado por delante
+        string arrowText = mtfTablePrefix + "Arrow_" + timeframes[i];
+        if(ObjectFind(0, arrowText) < 0) {
+            ObjectCreate(0, arrowText, OBJ_LABEL, 0, 0, 0);
+        }
+        ObjectSetInteger(0, arrowText, OBJPROP_XDISTANCE, mtfTableX + cellWidth + cellWidth/2);
+        ObjectSetInteger(0, arrowText, OBJPROP_YDISTANCE, yPos + cellHeight/2 - 2);
+        ObjectSetInteger(0, arrowText, OBJPROP_ZORDER, 2001);
+
+        string arrow = "";
+        color arrowColor = InpTableTextColor;
+        if(states[i] == 1) {
+            arrow = "↑";
+            arrowColor = InpArrowUpColor;
+        } else if(states[i] == -1) {
+            arrow = "↓";
+            arrowColor = InpArrowDownColor;
+        } else {
+            arrow = "—";
+            arrowColor = C'100,100,100';
+        }
+        ObjectSetString(0, arrowText, OBJPROP_TEXT, arrow);
+        ObjectSetString(0, arrowText, OBJPROP_FONT, "Arial");
+        ObjectSetInteger(0, arrowText, OBJPROP_FONTSIZE, InpTableFontSize + 2);
+        ObjectSetInteger(0, arrowText, OBJPROP_COLOR, arrowColor);
+        ObjectSetInteger(0, arrowText, OBJPROP_ANCHOR, ANCHOR_CENTER);
+        ObjectSetInteger(0, arrowText, OBJPROP_SELECTABLE, false);
+    }
+
+    // Línea vertical divisoria delante
+    string vLine = mtfTablePrefix + "VLine";
+    if(ObjectFind(0, vLine) < 0) {
+        ObjectCreate(0, vLine, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+    }
+    ObjectSetInteger(0, vLine, OBJPROP_XDISTANCE, mtfTableX + cellWidth);
+    ObjectSetInteger(0, vLine, OBJPROP_YDISTANCE, mtfTableY + headerHeight);
+    ObjectSetInteger(0, vLine, OBJPROP_XSIZE, 1);
+    ObjectSetInteger(0, vLine, OBJPROP_YSIZE, cellHeight * 8);
+    ObjectSetInteger(0, vLine, OBJPROP_BGCOLOR, InpTableBorderColor);
+    ObjectSetInteger(0, vLine, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+    ObjectSetInteger(0, vLine, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, vLine, OBJPROP_SELECTABLE, false);
+    ObjectSetInteger(0, vLine, OBJPROP_BACK, false);
+    ObjectSetInteger(0, vLine, OBJPROP_ZORDER, 1500);
+
+    mtfTableCreated = true;
+}
+
+//+------------------------------------------------------------------+
+//| Actualizar estados de cruces MTF                                |
+//+------------------------------------------------------------------+
+void UpdateMTFCrossStates()
+{
+    // Actualizar estado para cada TF
+    mtfCrossState_5m = GetLastCrossDirection(PERIOD_M5);
+    mtfCrossState_15m = GetLastCrossDirection(PERIOD_M15);
+    mtfCrossState_1H = GetLastCrossDirection(PERIOD_H1);
+    mtfCrossState_4H = GetLastCrossDirection(PERIOD_H4);
+    mtfCrossState_12H = GetLastCrossDirection(PERIOD_H12);
+    mtfCrossState_D = GetLastCrossDirection(PERIOD_D1);
+    mtfCrossState_W = GetLastCrossDirection(PERIOD_W1);
+    mtfCrossState_M = GetLastCrossDirection(PERIOD_MN1);
+}
+
+//+------------------------------------------------------------------+
+//| Obtener dirección del último cruce en un TF                     |
+//+------------------------------------------------------------------+
+int GetLastCrossDirection(ENUM_TIMEFRAMES tf)
+{
+    int bars = iBars(_Symbol, tf);
+    if(bars < 10) return 0;
+
+    datetime lastUp = 0;
+    datetime lastDown = 0;
+
+    // Mirar hasta 150 velas atrás del TF consultado
+    int maxLookback = MathMin(150, bars - 3); // -3 para i+2 seguro
+    for(int i = 2; i <= maxLookback; i++)
+    {
+        datetime pivotTime = iTime(_Symbol, tf, i);
+
+        // HIGH pattern -> buscar CUÁNDO se cruzó por encima de h0 por primera vez tras el pivote
+        double h2 = iHigh(_Symbol, tf, i+2);
+        double h1 = iHigh(_Symbol, tf, i+1);
+        double h0 = iHigh(_Symbol, tf, i);
+        double hm1 = iHigh(_Symbol, tf, i-1);
+        double hm2 = iHigh(_Symbol, tf, i-2);
+        if(h2 < h1 && h1 < h0 && h0 > hm1 && hm1 > hm2)
+        {
+            for(int j = i-1; j >= 0; j--)
+            {
+                if(iHigh(_Symbol, tf, j) >= h0)
+                {
+                    datetime tCross = iTime(_Symbol, tf, j);
+                    if(tCross > lastUp) lastUp = tCross;
+                    break; // primera vez que se cruzó tras el pivote
+                }
+            }
+        }
+
+        // LOW pattern -> buscar CUÁNDO se cruzó por debajo de l0 por primera vez tras el pivote
+        double l2 = iLow(_Symbol, tf, i+2);
+        double l1 = iLow(_Symbol, tf, i+1);
+        double l0 = iLow(_Symbol, tf, i);
+        double lm1 = iLow(_Symbol, tf, i-1);
+        double lm2 = iLow(_Symbol, tf, i-2);
+        if(l2 > l1 && l1 > l0 && l0 < lm1 && lm1 < lm2)
+        {
+            for(int j = i-1; j >= 0; j--)
+            {
+                if(iLow(_Symbol, tf, j) <= l0)
+                {
+                    datetime tCross = iTime(_Symbol, tf, j);
+                    if(tCross > lastDown) lastDown = tCross;
+                    break;
+                }
+            }
+        }
+    }
+
+    if(lastUp == 0 && lastDown == 0) return 0;
+    return (lastUp >= lastDown) ? 1 : -1; // 1=UP, -1=DOWN
+}
+//+------------------------------------------------------------------+
+//| Eliminar tabla MTF                                              |
+//+------------------------------------------------------------------+
+void RemoveMTFTable()
+{
+    ObjectsDeleteAll(0, mtfTablePrefix, 0, -1);
+    mtfTableCreated = false;
+}
+
+void AlertArrowChange(string tfName, int prev, int curr)
+{
+    if((prev == 1 || prev == -1) && (curr == 1 || curr == -1) && prev != curr)
+    {
+        string fromDir = (prev == 1) ? "UP" : "DOWN";
+        string toDir   = (curr == 1) ? "UP" : "DOWN";
+        string msg = StringFormat("%s MTF %s arrow changed: %s -> %s | Price: %.*f",
+                                  _Symbol, tfName, fromDir, toDir, _Digits,
+                                  SymbolInfoDouble(_Symbol, SYMBOL_BID));
+        if(InpArrowAlertVisual) Alert(msg);
+        if(InpArrowAlertSound)  PlaySound(InpArrowAlertSoundFile);
+        Print(msg);
+    }
+}
+
+void FireMTFArrowChangeAlerts()
+{
+    if(!InpAlertOnArrowChange) return;
+
+    // Primera pasada: inicializar sin alertar
+    if(!mtfArrowAlertsInitialized)
+    {
+        mtfPrevCrossState_5m  = mtfCrossState_5m;
+        mtfPrevCrossState_15m = mtfCrossState_15m;
+        mtfPrevCrossState_1H  = mtfCrossState_1H;
+        mtfPrevCrossState_4H  = mtfCrossState_4H;
+        mtfPrevCrossState_12H = mtfCrossState_12H;
+        mtfPrevCrossState_D   = mtfCrossState_D;
+        mtfPrevCrossState_W   = mtfCrossState_W;
+        mtfPrevCrossState_M   = mtfCrossState_M;
+        mtfArrowAlertsInitialized = true;
+        return;
+    }
+
+    // Alertar cambios UP <-> DOWN
+    AlertArrowChange("5m",  mtfPrevCrossState_5m,  mtfCrossState_5m);
+    AlertArrowChange("15m", mtfPrevCrossState_15m, mtfCrossState_15m);
+    AlertArrowChange("1H",  mtfPrevCrossState_1H,  mtfCrossState_1H);
+    AlertArrowChange("4H",  mtfPrevCrossState_4H,  mtfCrossState_4H);
+    AlertArrowChange("12H", mtfPrevCrossState_12H, mtfCrossState_12H);
+    AlertArrowChange("D",   mtfPrevCrossState_D,   mtfCrossState_D);
+    AlertArrowChange("W",   mtfPrevCrossState_W,   mtfCrossState_W);
+    AlertArrowChange("M",   mtfPrevCrossState_M,   mtfCrossState_M);
+
+    // Actualizar estados previos
+    mtfPrevCrossState_5m  = mtfCrossState_5m;
+    mtfPrevCrossState_15m = mtfCrossState_15m;
+    mtfPrevCrossState_1H  = mtfCrossState_1H;
+    mtfPrevCrossState_4H  = mtfCrossState_4H;
+    mtfPrevCrossState_12H = mtfCrossState_12H;
+    mtfPrevCrossState_D   = mtfCrossState_D;
+    mtfPrevCrossState_W   = mtfCrossState_W;
+    mtfPrevCrossState_M   = mtfCrossState_M;
+}
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
